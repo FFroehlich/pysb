@@ -152,13 +152,19 @@ class Builder(object):
         """Adds a rule to the Builder's model instance."""
         r = Rule(*args, _export=False, **kwargs)
         self.model.add_component(r)
-        return r 
+        return r
+
+    def energypattern(self, *args, **kwargs):
+        """Adds an energypattern to the Builder's model instance."""
+        ep = EnergyPattern(*args, _export=False, **kwargs)
+        self.model.add_component(ep)
+        return ep
 
     def compartment(self, *args, **kwargs):
         """Adds a compartment to the Builder's model instance."""
         c = Compartment(*args, _export=False, **kwargs)
         self.model.add_component(c)
-        return c 
+        return c
 
     def observable(self, *args, **kwargs):
         """Adds an observable to the Builder's model instance."""
@@ -181,4 +187,8 @@ class Builder(object):
         from the instance of the model contained by the Builder."""
         return self.model.all_components()[index]
 
-
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as e:
+            raise AttributeError("Model has no component '%s'" % name)

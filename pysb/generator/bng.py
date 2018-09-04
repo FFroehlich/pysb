@@ -33,6 +33,7 @@ class BngGenerator(object):
         self.generate_observables()
         self.generate_functions()
         self.generate_species()
+        self.generate_energy_patterns()
         self.generate_reaction_rules()
         self.generate_population_maps()
         self.__content += "end model\n"
@@ -96,9 +97,14 @@ class BngGenerator(object):
             arrow = '->'
             if r.is_reversible:
                 arrow = '<->'
+            if not r.energy:
+                kf = r.rate_forward.name
+            else:
+                kf = 'Arrhenius(%s, %s)' % (r.rate_forward.name,
+                                            r.rate_reverse.name)
             self.__content += ("  %-" + str(max_length) + "s  %s %s %s    %s") % \
-                (label, reactants_code, arrow, products_code, r.rate_forward.name)
-            if r.is_reversible:
+                (label, reactants_code, arrow, products_code, kf)
+            if r.is_reversible and not r.energy:
                 self.__content += ', %s' % r.rate_reverse.name
             if r.delete_molecules:
                 self.__content += ' DeleteMolecules'
@@ -106,6 +112,23 @@ class BngGenerator(object):
                 self.__content += ' MoveConnected'
             self.__content += "\n"
         self.__content += "end reaction rules\n\n"
+
+    def generate_energy_patterns(self):
+        if not self.model.energypatterns:
+            return
+        max_length = max(len(name) for name in self.model.energypatterns.keys())
+        self.__content += "begin energy patterns\n"
+        for ep in self.model.energypatterns:
+            label = ep.name + ':'
+            pattern = format_complexpattern(ep.pattern)
+            # FIXME Fake out expression_to_muparser for now.
+            fake_expr = type('FakeExpr', (object,), {})()
+            fake_expr.expr = ep.energy
+            energy = expression_to_muparser(fake_expr)
+            self.__content += (("  %-" + str(max_length) + "s  %s    %s")
+                               % (label, pattern, energy))
+            self.__content += "\n"
+        self.__content += "end energy patterns\n\n"
 
     def generate_observables(self):
         if not self.model.observables:
@@ -136,6 +159,8 @@ class BngGenerator(object):
             warn_caller("Model does not contain any initial conditions")
             return
         species_codes = [format_complexpattern(cp) for cp, param in self.model.initial_conditions]
+        fixed = ['$' if f else '' for f in self.model.initial_conditions_fixed]
+        species_codes = [f + c for f, c in zip(fixed, species_codes)]
         for cp in self._additional_initials:
             if not any([cp.is_equivalent_to(i) for i, _ in
                         self.model.initial_conditions]):
@@ -272,10 +297,12 @@ class BngPrinter(StrPrinter):
         return super(BngPrinter, self)._print_Pow(expr, rational)\
             .replace('**', '^')
 
-    def _print_log(self, expr):
+    def _print_Function(self, expr):
         # BNG doesn't accept "log", only "ln".
-        return 'ln' + "(%s)" % self.stringify(expr.args, ", ")
-
+        if expr.func.__name__ == 'log':
+            return 'ln' + "(%s)" % self.stringify(expr.args, ", ")
+        else:
+            return super(BngPrinter, self)._print_Function(expr)
 
 def expression_to_muparser(expression):
     """Render the Expression as a muparser-compatible string."""

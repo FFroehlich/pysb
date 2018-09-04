@@ -1,12 +1,10 @@
 from pysb.simulator.base import Simulator, SimulationResult
 import scipy.integrate
 try:
-    # weave is not available under Python 3.
-    from weave import inline as weave_inline
-    import weave.build_tools
+    from cython import inline as cython_inline
     import distutils.errors
 except ImportError:
-    weave_inline = None
+    cython_inline = None
 try:
     import theano.tensor
     from sympy.printing.theanocode import theano_function
@@ -20,6 +18,8 @@ from sympy.printing.lambdarepr import lambdarepr
 import distutils
 import pysb.bng
 import sympy
+from sympy.printing.lambdarepr import lambdarepr
+import scipy.sparse
 import re
 import numpy as np
 import warnings
@@ -29,6 +29,17 @@ import logging
 import itertools
 import contextlib
 import importlib
+
+CYTHON_DIRECTIVES = {
+    'boundscheck': False,
+    'wraparound': False,
+    'nonecheck': False,
+    'initializedcheck': False,
+}
+CYTHON_CONTEXT = ', '.join(
+    'cython.%s(%s)' % (d, v) for d, v in CYTHON_DIRECTIVES.items()
+)
+CYTHON_PRE = ['cimport cython', 'with %s:' % CYTHON_CONTEXT]
 
 
 CYTHON_DECL = '#cython: boundscheck=False, wraparound=False, ' \
@@ -156,9 +167,48 @@ class ScipyOdeSimulator(Simulator):
         pysb.bng.generate_equations(self._model, self.cleanup, self.verbose)
 
         # ODE RHS -----------------------------------------------
-        self._eqn_subs = {e: e.expand_expr(expand_observables=True) for
-                          e in self._model.expressions}
-        ode_mat = sympy.Matrix(self.model.odes).subs(self._eqn_subs)
+        expr_dynamic = self._model.expressions_dynamic()
+        expr_constant = self._model.expressions_constant()
+        s_y = sympy.IndexedBase('__y', len(self._model.species))
+        s_p = sympy.IndexedBase('__p', len(self._model.parameters))
+        s_e = sympy.IndexedBase('__e', len(expr_constant))
+        s_o = sympy.IndexedBase('__o', len(self._model.observables))
+        species_subs = {
+            sympy.Symbol('__s%d' % i): s_y[i]
+            for i in range(len(self._model.species))
+        }
+        param_subs = {
+            sympy.Symbol(p.name): s for p, s in zip(self._model.parameters, s_p)
+        }
+        param_subs.update(dict(zip(self._model.parameters, s_p)))
+        obs_subs = dict(zip(self._model.observables, s_o))
+        expr_dynamic_subs = {
+            sympy.Symbol(e.name): sympy.Symbol('__d%d' % i)
+            for i, e in enumerate(expr_dynamic)
+        }
+        expr_constant_subs = {
+            sympy.Symbol(e.name): s for e, s in zip(expr_constant, s_e)
+        }
+        replace_all = lambda e: (
+            e.xreplace(expr_constant_subs).xreplace(expr_dynamic_subs)
+            .xreplace(param_subs).xreplace(species_subs)
+        )
+        reaction_rates = [replace_all(r['rate']) for r in self._model.reactions]
+        dynamic_expressions = [
+            replace_all(e.expand_expr()).xreplace(obs_subs)
+            for e in expr_dynamic
+        ]
+        om_shape = (len(self.model.observables), len(self.model.species))
+        obs_matrix = scipy.sparse.lil_matrix(om_shape, dtype=np.int64)
+        for i, obs in enumerate(self.model.observables):
+            obs_matrix[i, obs.species] = obs.coefficients
+        obs_matrix = obs_matrix.tocsr()
+        self._calc_expr_constant = sympy.lambdify(
+            [s_p],
+            sympy.flatten([
+                e.expand_expr().xreplace(param_subs) for e in expr_constant
+            ])
+        )
 
         if compiler_mode is None:
             self._compiler = self._autoselect_compiler()
@@ -175,7 +225,7 @@ class ScipyOdeSimulator(Simulator):
             self._compiler = compiler_mode
 
         extra_compile_args = []
-        # Inhibit weave C compiler warnings unless log level <= EXTENDED_DEBUG.
+        # Inhibit cython C compiler warnings unless log level <= EXTENDED_DEBUG.
         # Note that since the output goes straight to stderr rather than via the
         # logging system, the threshold must be lower than DEBUG or else the
         # Nose logcapture plugin will cause the warnings to be shown and tests
@@ -183,6 +233,7 @@ class ScipyOdeSimulator(Simulator):
         if not self._logger.isEnabledFor(EXTENDED_DEBUG):
             extra_compile_args.append('-w')
 
+<<<<<<< HEAD
         # Use lambdarepr (Python code) with Cython, otherwise use C code
         eqn_repr = lambdarepr if self._compiler == 'cython' else sympy.ccode
 
@@ -237,16 +288,55 @@ class ScipyOdeSimulator(Simulator):
                                           + ',') + tuple(model.parameters)
 
             if self._compiler == 'theano':
+=======
+        if self._use_inline and not use_theano:
+            # Prepare the string representations of the dynamic expressions and
+            # RHS equations.
+            vector_syms = ['v', 'y', 'p', 'e', 'o']
+            cdef_code = (
+                ['cdef double *__{0} = <double *> {0}.data'.format(n)
+                 for n in vector_syms]
+                + ['cdef double __d{0}'.format(i)
+                   for i in range(len(dynamic_expressions))]
+            )
+            de_eqs = ['__d{0} = {1};'.format(i, lambdarepr(e))
+                      for i, e in enumerate(dynamic_expressions)]
+            rr_eqs = ['__v[%d] = %s;' % (i, lambdarepr(r))
+                      for i, r in enumerate(reaction_rates)]
+            code_eqs = '\n'.join(cdef_code + de_eqs + rr_eqs)
+
+            # Allocate a few arrays here, once.
+            ydot = np.zeros(len(self.model.species))
+            v = np.zeros(len(self.model.reactions))
+            o = np.zeros(len(self.model.observables))
+            def rhs(t, y, p, e):
+                o[:] = obs_matrix * y
+                # Note that the C code sets v as a side effect
+                cython_inline(code_eqs)
+                ydot[:] = self._model.stoichiometry_matrix * v
+                return ydot
+
+            # Call rhs once just to trigger the weave C compilation step while
+            # asserting control over distutils logging.
+            with self._patch_distutils_logging:
+                rhs(0.0, self.initials[0], self.param_values[0],
+                    np.array(self._calc_expr_constant(self.param_values[0])))
+
+        else:
+            if use_theano:
+                raise NotImplementedError("work in progress")
+>>>>>>> 63246268bd0647e0796b581ccd090d269bfe19d2
                 if theano is None:
                     raise ImportError('Theano library is not installed')
 
                 code_eqs_py = theano_function(
-                    self._symbols,
+                    symbols,
                     [o if not o.is_zero else theano.tensor.zeros(1)
                      for o in ode_mat],
                     on_unused_input='ignore'
                 )
             else:
+<<<<<<< HEAD
                 code_eqs_py = sympy.lambdify(self._symbols,
                                              sympy.flatten(ode_mat))
 
@@ -254,6 +344,21 @@ class ScipyOdeSimulator(Simulator):
                 return code_eqs_py(*itertools.chain(y, p))
         else:
             raise ValueError('Unknown compiler_mode: %s' % self._compiler)
+=======
+                de_syms = [sympy.Symbol('__d%d' % i)
+                           for i in range(len(expr_dynamic))]
+                de_py = sympy.lambdify([s_y, s_p, s_e, s_o],
+                                       dynamic_expressions)
+                rates_py = sympy.lambdify([s_y, s_p, s_e] + de_syms,
+                                          reaction_rates)
+
+            def rhs(t, y, p, e):
+                o = obs_matrix * y
+                d = de_py(y, p, e, o)
+                v = rates_py(y, p, e, *d)
+                ydot = self._model.stoichiometry_matrix * v
+                return ydot
+>>>>>>> 63246268bd0647e0796b581ccd090d269bfe19d2
 
         # JACOBIAN -----------------------------------------------
         # We'll keep the code for putting together the matrix in Sympy
@@ -261,13 +366,14 @@ class ScipyOdeSimulator(Simulator):
         # put together the sensitivity matrix)
         jac_fn = None
         if self._use_analytic_jacobian:
+            raise NotImplementedError("work in progress")
             species_symbols = [sympy.Symbol('__s%d' % i)
                                for i in range(len(self._model.species))]
             jac_matrix = ode_mat.jacobian(species_symbols)
 
             if self._compiler == 'theano':
                 jac_eqs_py = theano_function(
-                    self._symbols,
+                    symbols,
                     [j if not j.is_zero else theano.tensor.zeros(1)
                      for j in jac_matrix],
                     on_unused_input='ignore'
@@ -325,7 +431,7 @@ class ScipyOdeSimulator(Simulator):
                     with _set_cflags_no_warnings(self._logger):
                         jacobian(0.0, self.initials[0], self.param_values[0])
             else:
-                jac_eqs_py = sympy.lambdify(self._symbols, jac_matrix, "numpy")
+                jac_eqs_py = sympy.lambdify(symbols, jac_matrix, "numpy")
 
                 def jacobian(t, y, p):
                     return jac_eqs_py(*itertools.chain(y, p))
@@ -383,7 +489,7 @@ class ScipyOdeSimulator(Simulator):
         """
         if not hasattr(cls, '_use_inline'):
             cls._use_inline = False
-            if weave_inline is not None:
+            if cython_inline is not None:
                 logger = get_logger(__name__)
                 extra_compile_args = []
                 # See comment in __init__ for why this must be EXTENDED_DEBUG.
@@ -394,11 +500,9 @@ class ScipyOdeSimulator(Simulator):
                         extra_compile_args.append('2>NUL')
                 try:
                     with _patch_distutils_logging(logger):
-                        weave_inline('int i=0; i=i;', force=1,
-                                     extra_compile_args=extra_compile_args)
+                        cython_inline('i=1', force=True)
                     cls._use_inline = True
-                except (weave.build_tools.CompileError,
-                        distutils.errors.CompileError, ImportError):
+                except (distutils.errors.CompileError, ImportError):
                     pass
                 except ValueError as e:
                     if len(e.args) == 1 and \
@@ -499,8 +603,10 @@ class ScipyOdeSimulator(Simulator):
             else:
                 self.integrator.set_initial_value(self.initials[n],
                                                   self.tspan[0])
-                # Set parameter vectors for RHS func and Jacobian
-                self.integrator.set_f_params(self.param_values[n])
+                # Set parameter and constant expression vectors for callbacks.
+                p = self.param_values[n]
+                e = np.array(self._calc_expr_constant(p))
+                self.integrator.set_f_params(p, e)
                 if self._use_analytic_jacobian:
                     self.integrator.set_jac_params(self.param_values[n])
                 trajectories[n][0] = self.initials[n]

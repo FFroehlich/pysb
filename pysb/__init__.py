@@ -2,8 +2,8 @@ from pysb.core import *
 from pysb.annotation import Annotation
 
 __all__ = ['Observable', 'Initial', 'MatchOnce', 'Model', 'Monomer',
-           'Parameter', 'Compartment', 'Rule', 'Expression', 'ANY', 'WILD',
-           'Annotation']
+           'Parameter', 'Compartment', 'Rule', 'EnergyPattern', 'Expression',
+           'ANY', 'WILD', 'Annotation']
 
 try:
     import reinteract         # fails if reinteract not installed

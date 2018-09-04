@@ -9,6 +9,7 @@ import weakref
 import copy
 import itertools
 import sympy
+import numpy as np
 import scipy.sparse
 import networkx as nx
 
@@ -23,9 +24,9 @@ except NameError:
     basestring = str
     long = int
 
-def Initial(*args):
+def Initial(*args, **kwargs):
     """Declare an initial condition (see Model.initial)."""
-    return SelfExporter.default_model.initial(*args)
+    return SelfExporter.default_model.initial(*args, **kwargs)
 
 def MatchOnce(pattern):
     """Make a ComplexPattern match-once."""
@@ -1193,6 +1194,10 @@ class Rule(Component):
         co-transport anything connected to that Monomer by a path in the same
         compartment. If False (default), connected Monomers will remain where
         they were.
+    energy : bool, optional
+        If True, this rule is an energy rule (as in Energy BNG) and the two
+        parameters are interpreted as the 'phi' and deltaG parameters of the
+        Arrhenius equation (see Hogg 2013 for details).
 
     Attributes
     ----------
@@ -1203,7 +1208,7 @@ class Rule(Component):
     """
 
     def __init__(self, name, rule_expression, rate_forward, rate_reverse=None,
-                 delete_molecules=False, move_connected=False,
+                 delete_molecules=False, move_connected=False, energy=False,
                  _export=True):
         Component.__init__(self, name, _export)
         if not isinstance(rule_expression, RuleExpression):
@@ -1219,6 +1224,7 @@ class Rule(Component):
         self.rate_reverse = rate_reverse
         self.delete_molecules = delete_molecules
         self.move_connected = move_connected
+        self.energy = energy
         # TODO: ensure all numbered sites are referenced exactly twice within each of reactants and products
 
         # Check synthesis products are concrete
@@ -1252,7 +1258,46 @@ class Rule(Component):
             ret += ', delete_molecules=True'
         if self.move_connected:
             ret += ', move_connected=True'
+        if self.energy:
+            ret += ', energy=True'
         ret += ')'
+        return ret
+
+
+class EnergyPattern(Component):
+
+    """
+    Model component representing an energy pattern.
+
+    Parameters
+    ----------
+    pattern : ComplexPattern
+        ComplexPattern describing the species to which the given deltaG in
+        `energy` should be attributed.
+    energy : sympy.Expr
+        Expression containing model parameters that defines the deltaG to be
+        ascribed to the part of a species matched by `pattern`.
+
+    Attributes
+    ----------
+
+    Identical to Parameters (see above).
+
+    """
+
+    def __init__(self, name, pattern, energy, _export=True):
+        Component.__init__(self, name, _export)
+        if not isinstance(pattern, ComplexPattern):
+            raise Exception("pattern is not a ComplexPattern object")
+        if not isinstance(energy, sympy.Expr):
+            raise Exception("energy is not a sympy.Expr object")
+        self.pattern = pattern
+        self.energy = energy
+
+    def __repr__(self):
+        ret = '%s(%s, %s, %s)' % \
+            (self.__class__.__name__, repr(self.name),
+             repr(self.pattern), repr(self.energy))
         return ret
 
 
@@ -1476,8 +1521,8 @@ class Model(object):
 
     """
 
-    _component_types = (Monomer, Compartment, Parameter, Rule, Observable,
-                        Expression)
+    _component_types = (Monomer, Compartment, Parameter, Rule, EnergyPattern,
+                        Observable, Expression)
 
     def __init__(self, name=None, base=None, _export=True):
         self.name = name
@@ -1487,9 +1532,11 @@ class Model(object):
         self.compartments = ComponentSet()
         self.parameters = ComponentSet()
         self.rules = ComponentSet()
+        self.energypatterns = ComponentSet()
         self.observables = ComponentSet()
         self.expressions = ComponentSet()
         self.initial_conditions = []
+        self.initial_conditions_fixed = []
         self.annotations = []
         self._odes = OdeView(self)
         self.reset_equations()
@@ -1506,6 +1553,7 @@ class Model(object):
                 self.add_component(component)
                 component._do_export()
             self.initial_conditions = model_copy.initial_conditions
+            self.initial_conditions_fixed = model_copy.initial_conditions_fixed
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -1664,6 +1712,8 @@ class Model(object):
                     sm[r, i] -= 1
                 for p in reaction['products']:
                     sm[p, i] += 1
+            fixed = np.array(self.initial_conditions_fixed).nonzero()[0]
+            sm[fixed, :] = 0
             self._stoichiometry_matrix = sm.tocsr()
         return self._stoichiometry_matrix
 
@@ -1739,7 +1789,7 @@ class Model(object):
             raise InvalidInitialConditionError("MatchOnce not allowed here")
         return complex_pattern
 
-    def initial(self, pattern, value):
+    def initial(self, pattern, value, fixed=False):
         """
         Add an initial condition.
 
@@ -1752,11 +1802,14 @@ class Model(object):
             A concrete pattern defining the species to initialize.
         value : Parameter
             Amount of the species the model will start with.
+        fixed : bool
+            Whether or not the species should be held fixed (never consumed).
 
         """
         complex_pattern = self._validate_initial_condition_pattern(pattern)
         validate_const_expr(value, "initial condition value")
         self.initial_conditions.append( (complex_pattern, value) )
+        self.initial_conditions_fixed.append(fixed)
 
     def update_initial_condition_pattern(self, before_pattern, after_pattern):
         """
@@ -1805,7 +1858,9 @@ class Model(object):
         # We retain the old parameter object:
         p = self.initial_conditions[ic_index][1]
         del self.initial_conditions[ic_index]
+        fixed = self.initial_conditions_fixed.pop(ic_index)
         self.initial_conditions.append( (after_pattern, p) )
+        self.initial_conditions_fixed.append(fixed)
 
     def get_species_index(self, complex_pattern):
         """

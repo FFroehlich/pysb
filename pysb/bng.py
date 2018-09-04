@@ -7,6 +7,7 @@ import subprocess
 import re
 import itertools
 import sympy
+from sympy.parsing.sympy_parser import parse_expr
 import numpy
 import tempfile
 import abc
@@ -733,6 +734,13 @@ def generate_equations(model, cleanup=True, verbose=False, **kwargs):
 def _parse_netfile(model, lines):
     """ Parse species, rxns and groups from a BNGL net file """
     try:
+        while 'begin parameters' not in next(lines):
+            pass
+        while True:
+            line = next(lines)
+            if 'end parameters' in line: break
+            _parse_parameter(model, line)
+
         while 'begin species' not in next(lines):
             pass
         model.species = []
@@ -768,6 +776,22 @@ def _parse_netfile(model, lines):
         pass
 
 
+def _parse_parameter(model, line):
+    """Parse a 'parameter' line from a BNGL net file."""
+    # In general we don't need to re-read parameters and expressions as we have
+    # them in the model already, but in some cases BNG will add new entries here
+    # that we will need to reference when constructing the equation rate
+    # expressions.
+    index, name, value, comment = line.strip().split(None, 3)
+    if name in model.all_components().keys():
+        return
+    components = (model.parameters | model.expressions | model.observables)
+    expr_namespace = {c.name: c for c in components}
+    sympy_expr = parse_expr(value.replace('^', '**'), local_dict=expr_namespace)
+    expression = pysb.core.Expression(name, sympy_expr, _export=False)
+    model.expressions.add(expression)
+
+
 def _parse_species(model, line):
     """Parse a 'species' line from a BNGL net file."""
     index, species, value = line.strip().split()
@@ -778,7 +802,7 @@ def _parse_species(model, line):
     monomer_patterns = []
     for ms in monomer_strings:
         monomer_name, site_strings, monomer_compartment_name = \
-            re.match(r'(\w+)\(([^)]*)\)(?:@(\w+))?', ms).groups()
+            re.match(r'\$?(\w+)\(([^)]*)\)(?:@(\w+))?', ms).groups()
         site_conditions = {}
         if len(site_strings):
             for ss in site_strings.split(','):
@@ -833,9 +857,14 @@ def _parse_reaction(model, line, reaction_cache):
                                   for r in rule_list])
     is_reverse = tuple(bool(i) for i in is_reverse)
     r_names = ['__s%d' % r for r in reactants]
-    rate_param = [model.parameters.get(r) or model.expressions.get(r) or
-                  float(r) for r in rate]
-    combined_rate = sympy.Mul(*[sympy.S(t) for t in r_names + rate_param])
+    rate_param = [
+        sympy.Symbol(r) if (r in model.parameters._map
+                            or r in model.expressions._map)
+        else sympy.Float(r)
+        for r in rate
+    ]
+    args = [sympy.Symbol(n) for n in r_names] + rate_param
+    combined_rate = sympy.Mul(*args)
     reaction = {
         'reactants': reactants,
         'products': products,

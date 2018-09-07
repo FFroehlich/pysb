@@ -231,7 +231,7 @@ class SbmlExporter(Exporter):
             rxn = smodel.createReaction()
             _check(rxn)
             _check(rxn.setId('r{}'.format(i)))
-            _check(rxn.setName('r{}'.format(i)))
+            _check(rxn.setName(' + '.join(reaction['rule'])))
             _check(rxn.setReversible(reaction['reversible']))
 
             for sp in reaction['reactants']:

@@ -170,7 +170,9 @@ class SbmlExporter(Exporter):
 
         # Initial values/assignments
         initial_concs = [0.0] * len(self.model.species)
-        for cp, param in self.model.initial_conditions:
+        initial_fixed = [False] * len(self.model.species)
+        for (cp, param), fixed in zip(self.model.initial_conditions,
+                             self.model.initial_conditions_fixed):
             sp_idx = self.model.get_species_index(cp)
             if isinstance(param, pysb.Expression):
                 ia = smodel.createInitialAssignment()
@@ -179,6 +181,7 @@ class SbmlExporter(Exporter):
                 init_mathml = self._sympy_to_sbmlast(sympify(param.name))
                 _check(ia.setMath(init_mathml))
                 initial_concs[sp_idx] = None
+                initial_fixed[sp_idx] = fixed
             else:
                 initial_concs[sp_idx] = param.value
 
@@ -206,7 +209,7 @@ class SbmlExporter(Exporter):
             _check(sp.setCompartment(compartment_name))
             _check(sp.setName(str(s).replace('% ', '._br_')))
             _check(sp.setBoundaryCondition(False))
-            _check(sp.setConstant(False))
+            _check(sp.setConstant(initial_fixed[i]))
             _check(sp.setHasOnlySubstanceUnits(True))
             if initial_concs[i] is not None:
                 _check(sp.setInitialAmount(initial_concs[i]))

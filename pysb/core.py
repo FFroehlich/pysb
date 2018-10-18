@@ -1597,9 +1597,12 @@ class Model(object):
 
     def parameters_rules(self):
         """Return a ComponentSet of the parameters used in rules."""
-        # rate_reverse is None for irreversible rules, so we'll need to filter those out
-        cset = ComponentSet(p for r in self.rules for p in (r.rate_forward, r.rate_reverse)
-                            if p is not None)
+        # rate_reverse is None for irreversible rules, so we'll need to filter
+        # those out
+        cset = ComponentSet(set([p
+                                 for r in self.rules
+                                 for p in (r.rate_forward, r.rate_reverse)
+                                 if p is not None]))
         # intersect with original parameter list to retain ordering
         return self.parameters & cset
 

@@ -279,8 +279,11 @@ class SbmlExporter(Exporter):
 
             _check(obs_rule)
             _check(obs_rule.setVariable(obs.getId()))
-
-            obs_mathml = self._sympy_to_sbmlast(observable.expand_obs())
+            if len(observable.species):
+                obs_sym = observable.expand_obs()
+            else:
+                obs_sym = sympify(0.0)
+            obs_mathml = self._sympy_to_sbmlast(obs_sym)
             _check(obs_rule.setMath(obs_mathml))
 
 

@@ -74,10 +74,7 @@ class PysbFlatExporter(Exporter):
         write_cset(self.model.observables)
         write_cset(self.model.expressions_dynamic())
         write_cset(self.model.rules)
-        for ep in self.model.energypatterns:
-            output.write("EnergyPattern('%s', %s, %s)\n" %
-                         (ep.name, repr(ep.pattern), ep.energy.name))
-        output.write("\n")
+        write_cset(self.model.energypatterns)
         for pattern, value in self.model.initial_conditions:
             output.write("Initial(%s, %s)\n" % (repr(pattern), value.name))
         output.write("\n")

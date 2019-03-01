@@ -437,8 +437,67 @@ class ScipyOdeSimulator(Simulator):
                     with _patch_distutils_logging(logger):
                         cython_inline('i=1', force=True)
                     cls._use_inline = True
-                except (distutils.errors.CompileError, ImportError):
-                    pass
+                except (weave.build_tools.CompileError,
+                        distutils.errors.CompileError,
+                        ImportError,
+                        ValueError) as e:
+                    if not cls._check_compiler_error(e, 'weave'):
+                        raise
+
+    @classmethod
+    def _test_cython(cls):
+        if not hasattr(cls, '_use_cython'):
+            cls._use_cython = False
+            if Cython is None:
+                return
+            try:
+                Cython.inline('x = 1', force=True, quiet=True)
+                cls._use_cython = True
+            except (Cython.Compiler.Errors.CompileError,
+                    distutils.errors.DistutilsPlatformError,
+                    ValueError) as e:
+                if not cls._check_compiler_error(e, 'cython'):
+                    raise
+
+    @staticmethod
+    def _check_compiler_error(e, compiler):
+        if isinstance(e, distutils.errors.DistutilsPlatformError) and \
+                str(e) != 'Unable to find vcvarsall.bat':
+            return False
+
+        if isinstance(e, ValueError) and e.args != ('Symbol table not found',):
+            return False
+
+        # Build platform-specific C compiler error message
+        message = 'Please check you have a functional C compiler'
+        if os.name == 'nt':
+            message += ', available from ' \
+                       'https://wiki.python.org/moin/WindowsCompilers'
+        else:
+            message += '.'
+
+        get_logger(__name__).warn(
+            '{} compiler appears non-functional. {}\n'
+            'Original error: {}'.format(compiler, message, repr(e)))
+
+        return True
+
+    @classmethod
+    def _autoselect_compiler(cls):
+        """ Auto-select equation backend """
+
+        # Try weave
+        cls._test_inline()
+        if cls._use_inline:
+            return 'weave'
+
+        # Try cython
+        cls._test_cython()
+        if cls._use_cython:
+            return 'cython'
+
+        # Default to python/lambdify
+        return 'python'
 
     def _eqn_substitutions(self, eqns):
         """String substitutions on the sympy C code for the ODE RHS and
@@ -569,3 +628,4 @@ class _DistutilsProxyLoggerAdapter(logging.LoggerAdapter):
     warn = logging.LoggerAdapter.info
     # Provide 'fatal' to match up with distutils log functions.
     fatal = logging.LoggerAdapter.critical
+

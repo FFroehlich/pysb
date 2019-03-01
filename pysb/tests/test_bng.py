@@ -4,6 +4,9 @@ from pysb.bng import *
 import os
 import unittest
 from nose.tools import assert_raises_regexp
+from pysb.generator.bng import BngPrinter
+import sympy
+import math
 
 
 @with_model
@@ -64,8 +67,8 @@ def test_compartment_species_equivalence():
     Initial(Q(x=None) ** C, p)
     Initial(R(y=None) ** C, p)
     generate_equations(model)
-    for i, (cp, param) in enumerate(model.initial_conditions):
-        ok_(cp.is_equivalent_to(model.species[i]))
+    for i, ic in enumerate(model.initials):
+        ok_(ic.pattern.is_equivalent_to(model.species[i]))
     ok_(model.species[2].is_equivalent_to(Q(x=1) ** C % R(y=1) ** C))
 
 
@@ -202,3 +205,72 @@ def test_bng_error():
         generate_equations,
         model
     )
+
+
+@with_model
+def test_fixed_species():
+    Monomer('A', ['a'])
+    Monomer('B', ['b'])
+    Initial(A(a=1) % B(b=1), Parameter('AB_0', 1), fixed=True)
+    Rule('rule1', A(a=1) % B(b=1) >> A(a=None) + B(b=None), Parameter('k', 1))
+    generate_equations(model)
+    num_non_zeros = model.stoichiometry_matrix[0].getnnz()
+    assert num_non_zeros == 0
+
+
+def _bng_print(expr):
+    return BngPrinter(order='none').doprint(expr)
+
+
+def _rint(num):
+    """ This is how BNG/muparser does "rounding" """
+    return math.floor(num + 0.5)
+
+
+def test_bng_rounding():
+    """ Test Ceiling and Floor match BNG implementation of rounding """
+    x_sym = sympy.symbols('x')
+    for x in (-1.5, -1, -0.5, 0, 0.5, 1.0, 1.5):
+        for expr in (sympy.ceiling(x_sym), sympy.floor(x_sym)):
+            assert expr.subs({'x': x}) == eval(
+                _bng_print(expr), {}, {'rint': _rint, 'x': x})
+
+
+def test_bng_printer():
+    # Constants
+    assert _bng_print(sympy.pi) == '_pi'
+    assert _bng_print(sympy.E) == '_e'
+
+    x, y = sympy.symbols('x y')
+
+    # Binary functions
+    assert _bng_print(sympy.sympify('x & y')) == 'x && y'
+    assert _bng_print(sympy.sympify('x | y')) == 'x || y'
+
+    # Trig functions
+    assert _bng_print(sympy.sin(x)) == 'sin(x)'
+    assert _bng_print(sympy.cos(x)) == 'cos(x)'
+    assert _bng_print(sympy.tan(x)) == 'tan(x)'
+    assert _bng_print(sympy.asin(x)) == 'asin(x)'
+    assert _bng_print(sympy.acos(x)) == 'acos(x)'
+    assert _bng_print(sympy.atan(x)) == 'atan(x)'
+    assert _bng_print(sympy.sinh(x)) == 'sinh(x)'
+    assert _bng_print(sympy.cosh(x)) == 'cosh(x)'
+    assert _bng_print(sympy.tanh(x)) == 'tanh(x)'
+    assert _bng_print(sympy.asinh(x)) == 'asinh(x)'
+    assert _bng_print(sympy.acosh(x)) == 'acosh(x)'
+    assert _bng_print(sympy.atanh(x)) == 'atanh(x)'
+
+    # Logs and powers
+    assert _bng_print(sympy.log(x)) == 'ln(x)'
+    assert _bng_print(sympy.exp(x)) == 'exp(x)'
+    assert _bng_print(sympy.sqrt(x)) == 'sqrt(x)'
+
+    # Rounding
+    assert _bng_print(sympy.Abs(x)) == 'abs(x)'
+    assert _bng_print(sympy.floor(x)) == 'rint(x - 0.5)'
+    assert _bng_print(sympy.ceiling(x)) == '(rint(x + 1) - 1)'
+
+    # Min/max
+    assert _bng_print(sympy.Min(x, y)) == 'min(x, y)'
+    assert _bng_print(sympy.Max(x, y)) == 'max(x, y)'

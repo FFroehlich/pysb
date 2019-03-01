@@ -55,6 +55,10 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
         simres = self.sim.run()
         assert simres._nsims == 1
 
+    @raises(ValueError)
+    def test_invalid_init_kwarg(self):
+        ScipyOdeSimulator(self.model, tspan=self.time, spam='eggs')
+
     def test_lsoda_solver_run(self):
         """Test lsoda."""
         solver_lsoda = ScipyOdeSimulator(self.model, tspan=self.time,
@@ -71,9 +75,10 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
     def test_y0_as_list(self):
         """Test y0 with list of initial conditions"""
         # Test the initials getter method before anything is changed
-        assert np.allclose(self.sim.initials[0][0:2],
-                           [ic[1].value for ic in
-                            self.model.initial_conditions])
+        assert np.allclose(
+            self.sim.initials[0][0:2],
+            [ic.value.value for ic in self.model.initials]
+        )
 
         initials = [10, 20, 0]
         simres = self.sim.run(initials=initials)
@@ -196,6 +201,24 @@ class TestScipySimulatorSequential(TestScipySimulatorBase):
         assert np.allclose(simres.initials, new_initials)
         # Check that the single-run initials were removed after the run
         assert np.allclose(self.sim.initials, orig_initials)
+
+    def test_sequential_initials_dict_then_list(self):
+        A, B = self.model.monomers
+
+        base_sim = ScipyOdeSimulator(
+            self.model,
+            initials={A(a=None): 10, B(b=None): 20})
+
+        assert np.allclose(base_sim.initials, [10, 20, 0])
+        assert len(base_sim.initials_dict) == 2
+
+        # Now set initials using a list, which should overwrite the dict
+        base_sim.initials = [30, 40, 50]
+
+        assert np.allclose(base_sim.initials, [30, 40, 50])
+        assert np.allclose(
+            sorted([x[0] for x in base_sim.initials_dict.values()]),
+            base_sim.initials)
 
     def test_sequential_param_values(self):
         orig_param_values = self.sim.param_values

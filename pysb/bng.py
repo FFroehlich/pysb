@@ -97,8 +97,10 @@ class BngBaseInterface(object):
         """
         if not self.model.rules:
             raise NoRulesError()
-        if not self.model.initial_conditions and not any(r.is_synth() for r
-                                                         in self.model.rules):
+        if (
+            not self.model.initials
+            and not any(r.is_synth() for r in self.model.rules)
+        ):
             raise NoInitialConditionsError()
 
     @classmethod
@@ -226,7 +228,7 @@ class BngBaseInterface(object):
 
             # Read concentrations data
             try:
-                cdat_arr = numpy.loadtxt(base_filename + '.cdat', skiprows=1)
+                cdat_arr = numpy.loadtxt(base_filename + '.cdat', skiprows=1, ndmin=2)
                 # -1 for time column
                 names += ['__s%d' % i for i in range(cdat_arr.shape[1] - 1)]
             except IOError:
@@ -238,7 +240,7 @@ class BngBaseInterface(object):
                     # Exclude \# and time column
                     names += f.readline().split()[2:]
                     # Exclude first column (time)
-                    gdat_arr = numpy.loadtxt(f)
+                    gdat_arr = numpy.loadtxt(f, ndmin=2)
                     if cdat_arr is None:
                         cdat_arr = numpy.ndarray((len(gdat_arr), 0))
                     else:

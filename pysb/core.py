@@ -8,6 +8,7 @@ import collections
 import weakref
 import copy
 import itertools
+import numbers
 import sympy
 import numpy as np
 import scipy.sparse
@@ -1434,10 +1435,12 @@ class Expression(Component, sympy.Symbol):
         return (self.name, self.expr, False)
 
     def __init__(self, name, expr, _export=True):
-        Component.__init__(self, name, _export)
-        if not isinstance(expr, sympy.Expr):
+        if isinstance(expr, numbers.Number):
+            expr = sympy.Number(expr)
+        elif not isinstance(expr, sympy.Expr):
             raise ValueError('An Expression can only be created from a '
                              'sympy.Expr object')
+        Component.__init__(self, name, _export)
         self.expr = expr
 
     def expand_expr(self, expand_observables=False):

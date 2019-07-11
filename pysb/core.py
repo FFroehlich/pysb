@@ -1303,9 +1303,14 @@ class EnergyPattern(Component):
         self.energy = energy
 
     def __repr__(self):
-        ret = '%s(%s, %s, %s)' % \
-            (self.__class__.__name__, repr(self.name),
-             repr(self.pattern), self.energy.name)
+        if isinstance(self.energy, Component):
+            energystr = self.energy.name
+        else:
+            energystr = repr(self.energy)
+
+
+        ret = '%s(%s, %s, %s)' % (self.__class__.__name__, repr(self.name),
+                                  repr(self.pattern), energystr)
         return ret
 
 
@@ -1471,8 +1476,12 @@ class Expression(Component, sympy.Symbol):
         return sympy.Symbol
 
     def __repr__(self):
+        if isinstance(self.expr, Component):
+            exprstr = self.expr.name
+        else:
+            exprstr = repr(self.expr)
         ret = '%s(%s, %s)' % (self.__class__.__name__, repr(self.name),
-                              repr(self.expr))
+                              exprstr)
         return ret
 
     def __str__(self):

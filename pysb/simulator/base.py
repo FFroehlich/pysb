@@ -13,7 +13,7 @@ from datetime import datetime
 import dateutil.parser
 import copy
 from warnings import warn
-import sys
+from pysb.pattern import SpeciesPatternMatcher
 try:
     basestring
 except NameError:
@@ -54,9 +54,8 @@ class Simulator(object):
     initials : vector-like or dict, optional
         Values to use for the initial condition of all species. Ordering is
         determined by the order of model.species. If not specified, initial
-        conditions will be taken from model.initial_conditions (with
-        initial condition parameter values taken from `param_values` if
-        specified).
+        conditions will be taken from model.initials (with initial condition
+        parameter values taken from `param_values` if specified).
     param_values : vector-like or dict, optional
         Values to use for every parameter in the model. Ordering is
         determined by the order of model.parameters.
@@ -161,8 +160,7 @@ class Simulator(object):
             else:
                 return 1
 
-    @staticmethod
-    def _update_initials_dict(initials_dict, initials_source):
+    def _update_initials_dict(self, initials_dict, initials_source):
         if isinstance(initials_source, collections.Mapping):
             # Can't just use .update() as we need to test
             # equality with .is_equivalent_to()
@@ -176,15 +174,22 @@ class Simulator(object):
                 if not found:
                     initials_dict[cp] = val
         elif initials_source is not None:
-            for cp_idx, cp in enumerate(initials_dict.keys()):
+            # Update from array-like structure, which we can only do if we
+            # have the species available (e.g. not in network-free simulations)
+            if not self.model.species:
+                raise ValueError(
+                    'Cannot update initials from an array-like source without '
+                    'model species. ')
+            initials_dict = {}
+            for cp_idx, cp in enumerate(self.model.species):
                 initials_dict[cp] = [initials_source[n][cp_idx] for n in
                                      range(len(initials_source))]
         return initials_dict
 
     @property
     def initials_dict(self):
-        initials_dict = {cp: [param.value] for cp, param in
-                         self.model.initial_conditions}
+        initials_dict = {ic.pattern: [ic.value.value]
+                         for ic in self.model.initials}
         # Apply any base initial overrides
         initials_dict = self._update_initials_dict(initials_dict,
                                                    self._initials)
@@ -258,8 +263,8 @@ class Simulator(object):
                     for pv in self.param_values]
                 if len(subs) == 1 and n_sims_actual > 1:
                     subs = list(itertools.repeat(subs[0], n_sims_actual))
-            y0 = self._update_y0(y0, self._model.initial_conditions, subs,
-                                 n_sims_params)
+            ic_tuples = [(ic.pattern, ic.value) for ic in self._model.initials]
+            y0 = self._update_y0(y0, ic_tuples, subs, n_sims_params)
 
         # Any remaining unset initials should be set to zero
         y0 = np.nan_to_num(y0)
@@ -325,6 +330,14 @@ class Simulator(object):
         if new_initials is None:
             return None
 
+        # If new_initials is a pandas dataframe, convert to a dict
+        if pd and isinstance(new_initials, pd.DataFrame):
+            new_initials = new_initials.to_dict(orient='list')
+
+        # If new_initials is a list, convert to numpy array
+        if isinstance(new_initials, list):
+            new_initials = np.array(new_initials, copy=False)
+
         # Check if new_initials is a dict, and if so validate the keys
         # (ComplexPatterns)
         if isinstance(new_initials, dict):
@@ -349,9 +362,7 @@ class Simulator(object):
                 if not np.isfinite(val).all():
                     raise ValueError('Please check initial {} for non-finite '
                                      'values'.format(cplx_pat))
-        else:
-            if not isinstance(new_initials, np.ndarray):
-                new_initials = np.array(new_initials, copy=False)
+        elif isinstance(new_initials, np.ndarray):
             # if new_initials is a 1D array, convert to a 2D array of length 1
             if len(new_initials.shape) == 1:
                 new_initials = np.resize(new_initials, (1, len(new_initials)))
@@ -363,6 +374,11 @@ class Simulator(object):
             if not np.isfinite(new_initials).all():
                 raise ValueError('Please check initials array '
                                  'for non-finite values')
+        else:
+            raise ValueError(
+                'Implicit conversion of data type "{}" is not '
+                'supported. Please supply initials as a numpy array, list, '
+                'or a pandas DataFrame.'.format(type(new_initials)))
 
         if n_sims > 1:
             if not self._supports['multi_initials']:
@@ -446,6 +462,15 @@ class Simulator(object):
     def _process_incoming_params(self, new_params):
         if new_params is None:
             return None
+
+        # Convert pandas dataframe to dictionary
+        if pd and isinstance(new_params, pd.DataFrame):
+            new_params = new_params.to_dict(orient='list')
+
+        # If new_params is a list, convert to numpy array
+        if isinstance(new_params, list):
+            new_params = np.array(new_params)
+
         if isinstance(new_params, dict):
             n_sims = 1
             if len(new_params) > 0:
@@ -462,9 +487,7 @@ class Simulator(object):
                 if len(val) != n_sims:
                     raise ValueError("all arrays in params dictionary "
                                      "must be equal length")
-        else:
-            if not isinstance(new_params, np.ndarray):
-                new_params = np.array(new_params)
+        elif isinstance(new_params, np.ndarray):
             # if new_params is a 1D array, convert to a 2D array of length 1
             if len(new_params.shape) == 1:
                 new_params = np.resize(new_params, (1, len(new_params)))
@@ -473,6 +496,11 @@ class Simulator(object):
             if new_params.shape[1] != len(self._model.parameters):
                 raise ValueError("new_params must be the same length as "
                                  "model.parameters")
+        else:
+            raise ValueError(
+                'Implicit conversion of data type "{}" is not '
+                'supported. Please supply parameters as a numpy array, list, '
+                'or a pandas DataFrame.'.format(type(new_params)))
 
         # Check whether simulator supports multiple param_values
         if n_sims > 1 and not self._supports['multi_param_values']:
@@ -630,35 +658,35 @@ class SimulationResult(object):
 
     >>> print(simulation_result.observables['Bax_c0']) \
         #doctest: +NORMALIZE_WHITESPACE
-    [  1.0000e+00   1.1744e-02   1.3791e-04   1.6196e-06   1.9020e-08
-       2.2337e-10   2.6232e-12   3.0806e-14   3.6178e-16   4.2492e-18]
+    [1.0000e+00   1.1744e-02   1.3791e-04   1.6196e-06   1.9020e-08
+     2.2337e-10   2.6232e-12   3.0806e-14   3.6178e-16   4.2492e-18]
 
     It is also possible to retrieve the value of all observables at a
     particular time point, e.g. the final concentrations:
 
     >>> print(simulation_result.observables[-1]) \
         #doctest: +SKIP
-    (  4.2492e-18,   1.6996e-16,  1.)
+    (4.2492e-18,   1.6996e-16,  1.)
 
     Expressions are read in the same way as observables:
 
     >>> print(simulation_result.expressions['NBD_signal']) \
         #doctest: +NORMALIZE_WHITESPACE
-    [ 0.   4.7847  4.9956  4.9999  5.   5.   5.   5.   5.   5. ]
+    [0.   4.7847  4.9956  4.9999  5.   5.   5.   5.   5.   5. ]
 
     The species trajectories can be accessed as a numpy ndarray:
 
-    >>> print(simulation_result.species)
-    [[  1.0000e+00   0.0000e+00   0.0000e+00]
-     [  1.1744e-02   5.2194e-02   9.3606e-01]
-     [  1.3791e-04   1.2259e-03   9.9864e-01]
-     [  1.6196e-06   2.1595e-05   9.9998e-01]
-     [  1.9020e-08   3.3814e-07   1.0000e+00]
-     [  2.2337e-10   4.9637e-09   1.0000e+00]
-     [  2.6232e-12   6.9951e-11   1.0000e+00]
-     [  3.0806e-14   9.5840e-13   1.0000e+00]
-     [  3.6178e-16   1.2863e-14   1.0000e+00]
-     [  4.2492e-18   1.6996e-16   1.0000e+00]]
+    >>> print(simulation_result.species) #doctest: +NORMALIZE_WHITESPACE
+    [[1.0000e+00   0.0000e+00   0.0000e+00]
+     [1.1744e-02   5.2194e-02   9.3606e-01]
+     [1.3791e-04   1.2259e-03   9.9864e-01]
+     [1.6196e-06   2.1595e-05   9.9998e-01]
+     [1.9020e-08   3.3814e-07   1.0000e+00]
+     [2.2337e-10   4.9637e-09   1.0000e+00]
+     [2.6232e-12   6.9951e-11   1.0000e+00]
+     [3.0806e-14   9.5840e-13   1.0000e+00]
+     [3.6178e-16   1.2863e-14   1.0000e+00]
+     [4.2492e-18   1.6996e-16   1.0000e+00]]
 
     Species, observables and expressions can be combined into a single numpy
     ndarray and accessed similarly. Here, the initial concentrations of all
@@ -913,6 +941,107 @@ class SimulationResult(object):
         if not self._model.observables:
             raise ValueError('Model has no observables')
         return self._squeeze_output(self._yobs)
+
+    def observable(self, pattern):
+        """
+        Calculate a pattern's trajectories without adding to model
+
+        This method calculates an observable "on demand" using
+        any supplied MonomerPattern or ComplexPattern against the simulation
+        result, without re-running the simulation.
+
+        Note that the monomers within the supplied pattern are reconciled
+        with the SimulationResult's internal copy of the model by name. This
+        method only works on simulations which calculate species
+        trajectories (i.e. it will not work on network-free simulations).
+
+        Raises a ValueError if the pattern does not match at least one species.
+
+        Parameters
+        ----------
+        pattern: pysb.MonomerPattern or pysb.ComplexPattern
+            An observable pattern to match
+
+        Returns
+        -------
+        pandas.Series
+            Series containing the simulation trajectories for the specified
+            observable
+
+        Examples
+        --------
+
+        >>> from pysb import ANY
+        >>> from pysb.examples import earm_1_0
+        >>> from pysb.simulator import ScipyOdeSimulator
+        >>> simres = ScipyOdeSimulator(earm_1_0.model, tspan=range(5)).run()
+        >>> m = earm_1_0.model.monomers
+
+        Observable of bound Bid:
+
+        >>> simres.observable(m.Bid(b=ANY))
+        time
+        0    0.000000e+00
+        1    1.190933e-12
+        2    2.768582e-11
+        3    1.609716e-10
+        4    5.320530e-10
+        dtype: float64
+
+        Observable of AMito bound to mCytoC:
+
+        >>> simres.observable(m.AMito(b=1) % m.mCytoC(b=1))
+        time
+        0    0.000000e+00
+        1    1.477319e-77
+        2    1.669917e-71
+        3    5.076939e-69
+        4    1.157400e-66
+        dtype: float64
+        """
+
+        # Adjust the supplied pattern's monomer objects to match the
+        # simulationresult's internal model
+        if isinstance(pattern, MonomerPattern):
+            self._update_monomer_pattern(pattern)
+        elif isinstance(pattern, ComplexPattern):
+            for mp in pattern.monomer_patterns:
+                self._update_monomer_pattern(mp)
+        else:
+            raise ValueError('The pattern must be a MonomerPattern or '
+                             'ComplexPattern')
+
+        if self._y is None:
+            raise ValueError('On demand observables can only be calculated '
+                             'on simulations with species trajectories')
+
+        obs_matches = SpeciesPatternMatcher(self._model).match(
+            pattern, index=True, counts=True)
+
+        if not obs_matches:
+            raise ValueError('No species match the supplied observable '
+                             'pattern')
+
+        return self.dataframe.iloc[:, list(obs_matches.keys())].multiply(
+            list(obs_matches.values())).sum(axis=1)
+
+    def _update_monomer_pattern(self, pattern):
+        """ Update a pattern's monomer objects to use internal model
+
+        Internal function for in-place update of a pattern to replace its
+        monomers with those from SimulationResult's model, matching by name.
+
+        Raises ValueError if no monomer with the specified name is in the
+        model.
+        """
+        mon_name = pattern.monomer.name
+        try:
+            new_mon = self._model.monomers[mon_name]
+        except KeyError:
+            raise ValueError('There was no monomer called "{}" in the model '
+                             '"{}" at the time of simulation'.format(
+                                mon_name, self._model.name))
+        pattern.monomer = new_mon
 
     @property
     def expressions(self):

@@ -37,9 +37,8 @@ class StochKitSimulator(Simulator):
     initials : vector-like or dict, optional
         Values to use for the initial condition of all species. Ordering is
         determined by the order of model.species. If not specified, initial
-        conditions will be taken from model.initial_conditions (with
-        initial condition parameter values taken from `param_values` if
-        specified).
+        conditions will be taken from model.initials (with initial condition
+        parameter values taken from `param_values` if specified).
     param_values : vector-like or dict, optional
         Values to use for every parameter in the model. Ordering is
         determined by the order of model.parameters.
@@ -73,14 +72,14 @@ class StochKitSimulator(Simulator):
     A_total trajectory for first run
 
     >>> print(simulation_result.observables[0]['A_total']) \
-        #doctest: +ELLIPSIS
-    [ 1.  0.  0.  0.  0.]
+        #doctest: +NORMALIZE_WHITESPACE
+    [1.  0.  0.  0.  0.]
 
     A_total trajectory for second run
 
     >>> print(simulation_result.observables[1]['A_total']) \
         #doctest: +SKIP
-    [ 1.  1.  1.  0.  0.]
+    [1.  1.  1.  0.  0.]
 
     For further information on retrieving trajectories (species,
     observables, expressions over time) from the ``simulation_result``
@@ -97,7 +96,11 @@ class StochKitSimulator(Simulator):
                                                 param_values=param_values,
                                                 verbose=verbose,
                                                 **kwargs)
-        self.cleanup = kwargs.get('cleanup', True)
+        self.cleanup = kwargs.pop('cleanup', True)
+        if kwargs:
+            raise ValueError('Unknown keyword argument(s): {}'.format(
+                ', '.join(kwargs.keys())
+            ))
         self._outdir = None
         generate_equations(self._model,
                            cleanup=self.cleanup,

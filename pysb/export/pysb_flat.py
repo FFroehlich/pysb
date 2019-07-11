@@ -63,7 +63,8 @@ class PysbFlatExporter(Exporter):
         output.write("\n")
         output.write("from pysb import Model, Monomer, Parameter, Expression, "
                      "Compartment, Rule, Observable, Initial, MatchOnce, "
-                     "Annotation, ANY, WILD\n")
+                     "Annotation, EnergyPattern, ANY, WILD\n")
+        output.write("from sympy import exp, log\n")
         output.write("\n")
         output.write("Model()\n")
         output.write("\n")
@@ -74,8 +75,9 @@ class PysbFlatExporter(Exporter):
         write_cset(self.model.observables)
         write_cset(self.model.expressions_dynamic())
         write_cset(self.model.rules)
-        for pattern, value in self.model.initial_conditions:
-            output.write("Initial(%s, %s)\n" % (repr(pattern), value.name))
+        write_cset(self.model.energypatterns)
+        for ic in self.model.initials:
+            output.write("%s\n" % ic)
         output.write("\n")
         write_cset(self.model.annotations)
 

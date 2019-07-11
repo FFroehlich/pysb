@@ -1,7 +1,7 @@
 from pysb.testing import *
 from pysb.core import *
 from functools import partial
-import itertools
+from nose.tools import assert_raises
 
 
 @with_model
@@ -146,6 +146,14 @@ def test_duplicate_monomer_error():
 def test_observable_constructor_with_monomer():
     A = Monomer('A', _export=False)
     o = Observable('o', A, _export=False)
+
+@with_model
+def test_expand_obs_no_coeffs():
+    A = Monomer('A')
+    o = Observable('A_obs', A())
+    # Test that expand_obs works with observable when no coefficients or
+    # species are present
+    o.expand_obs()
 
 @with_model
 def test_compartment_initial_error():
@@ -306,6 +314,7 @@ def test_concreteness():
     assert (A(s=('x', 1)) % A(s=('x', 1))).is_concrete()
     assert (A(s='x')).is_concrete()
     assert not A().is_concrete()
+    assert not A(s=None).is_concrete()
     assert not A(s=('x', ANY)).is_concrete()
     assert not A(s=WILD).is_concrete()
 
@@ -328,3 +337,44 @@ def test_dangling_bond():
     Monomer('A', ['a'])
     Parameter('kf', 1.0)
     assert_raises(DanglingBondError, as_reaction_pattern, A(a=1) % A(a=None))
+
+
+@with_model
+def test_invalid_site_name():
+    assert_raises(ValueError, Monomer, 'A', ['1'])
+
+
+@with_model
+def test_invalid_state_value():
+    assert_raises(ValueError, Monomer, 'A', ['a'], {'a': ['1', 'a']})
+
+
+@with_model
+def test_valid_state_values():
+    Monomer('A', ['a'], {'a': ['_1', '_b', '_', '_a', 'a']})
+
+
+@with_model
+def test_expression_type():
+    assert_raises(ValueError, Expression, 'A', 1)
+
+
+@with_model
+def test_synth_requires_concrete():
+    Monomer('A', ['s'], {'s': ['a', 'b']})
+    Parameter('kA', 1.0)
+
+    # These synthesis products are not concrete (site "s" not specified),
+    # so they should raise a ValueError
+    assert_raises(ValueError, Rule, 'r1', None >> A(), kA)
+    assert_raises(ValueError, Rule, 'r2', A() | None, kA, kA)
+
+
+@with_model
+def test_rulepattern_match_none_against_state():
+    Monomer('A', ['phospho'], {'phospho': ['u', 'p']})
+
+    # A(phospho=None) should match unbound A regardless of phospho state,
+    # so this should be a valid rule pattern
+    A(phospho=None) + A(phospho=None) >> A(phospho=1) % A(phospho=1)
+

@@ -24,17 +24,6 @@ import itertools
 import contextlib
 import importlib
 
-CYTHON_DIRECTIVES = {
-    'boundscheck': False,
-    'wraparound': False,
-    'nonecheck': False,
-    'initializedcheck': False,
-}
-CYTHON_CONTEXT = ', '.join(
-    'cython.%s(%s)' % (d, v) for d, v in CYTHON_DIRECTIVES.items()
-)
-CYTHON_PRE = ['cimport cython', 'with %s:' % CYTHON_CONTEXT]
-
 
 class ScipyOdeSimulator(Simulator):
     """
@@ -59,9 +48,8 @@ class ScipyOdeSimulator(Simulator):
     initials : vector-like or dict, optional
         Values to use for the initial condition of all species. Ordering is
         determined by the order of model.species. If not specified, initial
-        conditions will be taken from model.initial_conditions (with
-        initial condition parameter values taken from `param_values` if
-        specified).
+        conditions will be taken from model.initials (with initial condition
+        parameter values taken from `param_values` if specified).
     param_values : vector-like or dict, optional
         Values to use for every parameter in the model. Ordering is
         determined by the order of model.parameters.
@@ -132,6 +120,13 @@ class ScipyOdeSimulator(Simulator):
         }
     }
 
+    default_cython_directives = {
+        'boundscheck': False,
+        'wraparound': False,
+        'nonecheck': False,
+        'initializedcheck': False
+    }
+
     def __init__(self, model, tspan=None, initials=None, param_values=None,
                  verbose=False, **kwargs):
 
@@ -142,59 +137,39 @@ class ScipyOdeSimulator(Simulator):
                                                 verbose=verbose,
                                                 **kwargs)
         # We'll need to know if we're using the Jacobian when we get to run()
-        self._use_analytic_jacobian = kwargs.get('use_analytic_jacobian',
+        self._use_analytic_jacobian = kwargs.pop('use_analytic_jacobian',
                                                  False)
-        self.cleanup = kwargs.get('cleanup', True)
-        integrator = kwargs.get('integrator', 'vode')
-        use_theano = kwargs.get('use_theano', False)
+        self.cleanup = kwargs.pop('cleanup', True)
+        integrator = kwargs.pop('integrator', 'vode')
+        compiler_mode = kwargs.pop('compiler', None)
+        integrator_options = kwargs.pop('integrator_options', {})
+        cython_directives = kwargs.pop('cython_directives',
+                                       self.default_cython_directives)
+        if kwargs:
+            raise ValueError('Unknown keyword argument(s): {}'.format(
+                ', '.join(kwargs.keys())
+            ))
         # Generate the equations for the model
         pysb.bng.generate_equations(self._model, self.cleanup, self.verbose)
 
         # ODE RHS -----------------------------------------------
-        expr_dynamic = self._model.expressions_dynamic()
-        expr_constant = self._model.expressions_constant()
-        s_y = sympy.IndexedBase('__y', len(self._model.species))
-        s_p = sympy.IndexedBase('__p', len(self._model.parameters))
-        s_e = sympy.IndexedBase('__e', len(expr_constant))
-        s_o = sympy.IndexedBase('__o', len(self._model.observables))
-        species_subs = {
-            sympy.Symbol('__s%d' % i): s_y[i]
-            for i in range(len(self._model.species))
-        }
-        param_subs = {
-            sympy.Symbol(p.name): s for p, s in zip(self._model.parameters, s_p)
-        }
-        param_subs.update(dict(zip(self._model.parameters, s_p)))
-        obs_subs = dict(zip(self._model.observables, s_o))
-        expr_dynamic_subs = {
-            sympy.Symbol(e.name): sympy.Symbol('__d%d' % i)
-            for i, e in enumerate(expr_dynamic)
-        }
-        expr_constant_subs = {
-            sympy.Symbol(e.name): s for e, s in zip(expr_constant, s_e)
-        }
-        replace_all = lambda e: (
-            e.xreplace(expr_constant_subs).xreplace(expr_dynamic_subs)
-            .xreplace(param_subs).xreplace(species_subs)
-        )
-        reaction_rates = [replace_all(r['rate']) for r in self._model.reactions]
-        dynamic_expressions = [
-            replace_all(e.expand_expr()).xreplace(obs_subs)
-            for e in expr_dynamic
-        ]
-        om_shape = (len(self.model.observables), len(self.model.species))
-        obs_matrix = scipy.sparse.lil_matrix(om_shape, dtype=np.int64)
-        for i, obs in enumerate(self.model.observables):
-            obs_matrix[i, obs.species] = obs.coefficients
-        obs_matrix = obs_matrix.tocsr()
-        self._calc_expr_constant = sympy.lambdify(
-            [s_p],
-            sympy.flatten([
-                e.expand_expr().xreplace(param_subs) for e in expr_constant
-            ])
-        )
+        self._eqn_subs = {e: e.expand_expr(expand_observables=True) for
+                          e in self._model.expressions}
+        ode_mat = sympy.Matrix(self.model.odes).subs(self._eqn_subs)
 
-        self._test_inline()
+        if compiler_mode is None:
+            self._compiler = self._autoselect_compiler()
+            if self._compiler == 'python':
+                self._logger.warning(
+                    "This system of ODEs will be evaluated in pure Python. "
+                    "This may be slow for large models. We recommend "
+                    "installing a package for compiling the ODEs to C code: "
+                    "'weave' (recommended for Python 2) or "
+                    "'cython' (recommended for Python 3). This warning can "
+                    "be suppressed by specifying compiler='python'.")
+            self._logger.debug('Equation mode set to "%s"' % self._compiler)
+        else:
+            self._compiler = compiler_mode
 
         extra_compile_args = []
         # Inhibit cython C compiler warnings unless log level <= EXTENDED_DEBUG.
@@ -238,9 +213,47 @@ class ScipyOdeSimulator(Simulator):
                 rhs(0.0, self.initials[0], self.param_values[0],
                     np.array(self._calc_expr_constant(self.param_values[0])))
 
-        else:
-            if use_theano:
-                raise NotImplementedError("work in progress")
+            if self._compiler == 'cython':
+                if not Cython:
+                    raise ImportError('Cython library is not installed')
+
+                def rhs(t, y, p):
+                    # note that the evaluated code sets ydot as a side effect
+                    Cython.inline(
+                        code_eqs, quiet=True,
+                        cython_compiler_directives=cython_directives)
+
+                    return ydot
+
+                with _set_cflags_no_warnings(self._logger):
+                    rhs(0.0, self.initials[0], self.param_values[0])
+            else:
+                # Weave
+                if not weave_inline:
+                    raise ImportError('Weave library is not installed')
+                for arr_name in ('ydot', 'y', 'p'):
+                    macro = arr_name.upper() + '1'
+                    code_eqs = re.sub(r'\b%s\[(\d+)\]' % arr_name,
+                                      '%s(\\1)' % macro, code_eqs)
+
+                def rhs(t, y, p):
+                    # note that the evaluated code sets ydot as a side effect
+                    weave_inline(code_eqs, ['ydot', 't', 'y', 'p'],
+                                 extra_compile_args=extra_compile_args)
+                    return ydot
+
+                # Call rhs once just to trigger the weave C compilation step
+                # while asserting control over distutils logging.
+                with self._patch_distutils_logging:
+                    rhs(0.0, self.initials[0], self.param_values[0])
+
+        elif self._compiler in ('theano', 'python'):
+            self._symbols = sympy.symbols(','.join('__s%d' % sp_id for sp_id in
+                                                   range(len(
+                                                       self.model.species)))
+                                          + ',') + tuple(model.parameters)
+
+            if self._compiler == 'theano':
                 if theano is None:
                     raise ImportError('Theano library is not installed')
 
@@ -325,6 +338,33 @@ class ScipyOdeSimulator(Simulator):
                 with self._patch_distutils_logging:
                     jacobian(0.0, self.initials[0], self.param_values[0])
 
+                if self._compiler == 'weave':
+                    # Substitute array refs with calls to the JAC1 macro
+                    jac_eqs = re.sub(r'\bjac\[(\d+), (\d+)\]',
+                                     r'JAC2(\1, \2)', jac_eqs)
+                    # Substitute calls to the Y1 and P1 macros
+                    for arr_name in ('y', 'p'):
+                        macro = arr_name.upper() + '1'
+                        jac_eqs = re.sub(r'\b%s\[(\d+)\]' % arr_name,
+                                         '%s(\\1)' % macro, jac_eqs)
+
+                    def jacobian(t, y, p):
+                        weave_inline(jac_eqs, ['jac', 't', 'y', 'p'],
+                                     extra_compile_args=extra_compile_args)
+                        return jac
+
+                    # Manage distutils logging, as above for rhs.
+                    with self._patch_distutils_logging:
+                        jacobian(0.0, self.initials[0], self.param_values[0])
+                else:
+                    def jacobian(t, y, p):
+                        Cython.inline(
+                            jac_eqs, quiet=True,
+                            cython_compiler_directives=cython_directives)
+                        return jac
+
+                    with _set_cflags_no_warnings(self._logger):
+                        jacobian(0.0, self.initials[0], self.param_values[0])
             else:
                 jac_eqs_py = sympy.lambdify(symbols, jac_matrix, "numpy")
 
@@ -340,7 +380,7 @@ class ScipyOdeSimulator(Simulator):
             options.update(
                 self.default_integrator_options[integrator])  # default options
 
-        options.update(kwargs.get('integrator_options', {}))  # overwrite
+        options.update(integrator_options)  # overwrite
         # defaults
         self.opts = options
 
@@ -397,8 +437,67 @@ class ScipyOdeSimulator(Simulator):
                     with _patch_distutils_logging(logger):
                         cython_inline('i=1', force=True)
                     cls._use_inline = True
-                except (distutils.errors.CompileError, ImportError):
-                    pass
+                except (weave.build_tools.CompileError,
+                        distutils.errors.CompileError,
+                        ImportError,
+                        ValueError) as e:
+                    if not cls._check_compiler_error(e, 'weave'):
+                        raise
+
+    @classmethod
+    def _test_cython(cls):
+        if not hasattr(cls, '_use_cython'):
+            cls._use_cython = False
+            if Cython is None:
+                return
+            try:
+                Cython.inline('x = 1', force=True, quiet=True)
+                cls._use_cython = True
+            except (Cython.Compiler.Errors.CompileError,
+                    distutils.errors.DistutilsPlatformError,
+                    ValueError) as e:
+                if not cls._check_compiler_error(e, 'cython'):
+                    raise
+
+    @staticmethod
+    def _check_compiler_error(e, compiler):
+        if isinstance(e, distutils.errors.DistutilsPlatformError) and \
+                str(e) != 'Unable to find vcvarsall.bat':
+            return False
+
+        if isinstance(e, ValueError) and e.args != ('Symbol table not found',):
+            return False
+
+        # Build platform-specific C compiler error message
+        message = 'Please check you have a functional C compiler'
+        if os.name == 'nt':
+            message += ', available from ' \
+                       'https://wiki.python.org/moin/WindowsCompilers'
+        else:
+            message += '.'
+
+        get_logger(__name__).warn(
+            '{} compiler appears non-functional. {}\n'
+            'Original error: {}'.format(compiler, message, repr(e)))
+
+        return True
+
+    @classmethod
+    def _autoselect_compiler(cls):
+        """ Auto-select equation backend """
+
+        # Try weave
+        cls._test_inline()
+        if cls._use_inline:
+            return 'weave'
+
+        # Try cython
+        cls._test_cython()
+        if cls._use_cython:
+            return 'cython'
+
+        # Default to python/lambdify
+        return 'python'
 
     def _eqn_substitutions(self, eqns):
         """String substitutions on the sympy C code for the ODE RHS and
@@ -529,3 +628,4 @@ class _DistutilsProxyLoggerAdapter(logging.LoggerAdapter):
     warn = logging.LoggerAdapter.info
     # Provide 'fatal' to match up with distutils log functions.
     fatal = logging.LoggerAdapter.critical
+

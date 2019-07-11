@@ -12,7 +12,6 @@ specified in one of three ways:
 """
 
 from __future__ import print_function as _
-import pysb
 import pysb.pathfinder as pf
 from pysb.generator.kappa import KappaGenerator
 import os
@@ -23,11 +22,15 @@ import tempfile
 import shutil
 import warnings
 from collections import namedtuple
+from pysb.util import read_dot
+import pysb.logging
 
 try:
     from future_builtins import zip
 except ImportError:
     pass
+
+logger = pysb.logging.get_logger(__name__)
 
 
 def set_kappa_path(path):
@@ -123,10 +126,8 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
     If flux_map is True, returns an instance of SimulationResult, a namedtuple
     with two members, `timecourse` and `flux_map`. The `timecourse` field
     contains the simulation ndarray, and the `flux_map` field is an instance of
-    a pygraphviz AGraph containing the flux map. The flux map can be rendered
-    as a pdf using the dot layout program as follows::
-
-        fluxmap.draw('fluxmap.pdf', prog='dot')
+    a networkx MultiGraph containing the flux map. For details on viewing
+    the flux map graphically see :func:`run_static_analysis` (notes section).
     """
 
     gen = KappaGenerator(model)
@@ -154,16 +155,19 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
     # Generate the Kappa model code from the PySB model and write it to
     # the Kappa file:
     with open(kappa_filename, 'w') as kappa_file:
-        kappa_file.write(gen.get_content())
+        file_data = gen.get_content()
         # If desired, add instructions to the kappa file to generate the
         # flux map:
         if flux_map:
-            kappa_file.write('%%mod: [true] do $FLUX "%s" [true]\n' %
-                             fm_filename)
+            file_data += '%%mod: [true] do $DIN "%s" [true];\n' % fm_filename
+
         # If any perturbation language code has been passed in, add it to
         # the Kappa file:
         if perturbation:
-            kappa_file.write('\n%s\n' % perturbation)
+            file_data += '\n%s\n' % perturbation
+
+        logger.debug('Kappa file contents:\n\n' + file_data)
+        kappa_file.write(file_data)
 
     # Run KaSim
     kasim_path = pf.get_path('kasim')
@@ -184,19 +188,14 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
 
     if flux_map:
         try:
-            import pygraphviz
-            flux_graph = pygraphviz.AGraph(fm_filename)
+            flux_graph = read_dot(fm_filename)
         except ImportError:
             if cleanup:
-                raise RuntimeError(
-                        "Couldn't import pygraphviz, which is "
-                        "required to return the flux map as a "
-                        "pygraphviz AGraph object. Either install "
-                        "pygraphviz or set cleanup=False to retain "
-                        "dot files.")
+                raise
             else:
                 warnings.warn(
-                        "pygraphviz could not be imported so no AGraph "
+                        "The pydot library could not be "
+                        "imported, so no MultiGraph "
                         "object returned (returning None); flux map "
                         "dot file available at %s" % fm_filename)
                 flux_graph = None
@@ -205,7 +204,7 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
         shutil.rmtree(base_directory)
 
     # If a flux map was generated, return both the simulation output and the
-    # flux map as a pygraphviz graph
+    # flux map as a networkx multigraph
     if flux_map:
         return SimulationResult(data, flux_graph)
     # If no flux map was requested, return only the simulation data
@@ -247,9 +246,26 @@ def run_static_analysis(model, influence_map=False, contact_map=False,
     -------
     StaticAnalysisResult, a namedtuple with two fields, `contact_map` and
     `influence_map`, each containing the respective result as an instance
-    of a pygraphviz AGraph. If the either the contact_map or influence_map
+    of a networkx MultiGraph. If the either the contact_map or influence_map
     argument to the function is False, the corresponding entry in the
     StaticAnalysisResult returned by the function will be None.
+
+    Notes
+    -----
+    To view a networkx file graphically, use `draw_network`::
+
+        import networkx as nx
+        nx.draw_networkx(g, with_labels=True)
+
+    You can use `graphviz_layout` to use graphviz for layout (requires pydot
+    library)::
+
+        import networkx as nx
+        pos = nx.drawing.nx_pydot.graphviz_layout(g, prog='dot')
+        nx.draw_networkx(g, pos, with_labels=True)
+
+    For further information, see the networkx documentation on visualization:
+    https://networkx.github.io/documentation/latest/reference/drawing.html
     """
 
     # Make sure the user has asked for an output!
@@ -293,7 +309,9 @@ def run_static_analysis(model, influence_map=False, contact_map=False,
     # Generate the Kappa model code from the PySB model and write it to
     # the Kappa file:
     with open(kappa_filename, 'w') as kappa_file:
-        kappa_file.write(gen.get_content())
+        file_data = gen.get_content()
+        logger.debug('Kappa file contents:\n\n' + file_data)
+        kappa_file.write(file_data)
 
     # Run KaSa using the given args
     kasa_path = pf.get_path('kasa')
@@ -311,22 +329,17 @@ def run_static_analysis(model, influence_map=False, contact_map=False,
 
     # Try to create the graphviz objects from the .dot files created
     try:
-        import pygraphviz
         # Convert the contact map to a Graph
-        cmap = pygraphviz.AGraph(cm_filename) if contact_map else None
-        imap = pygraphviz.AGraph(im_filename) if influence_map else None
+        cmap = read_dot(cm_filename) if contact_map else None
+        imap = read_dot(im_filename) if influence_map else None
     except ImportError:
         if cleanup:
-            raise RuntimeError(
-                    "Couldn't import pygraphviz, which is "
-                    "required to return the influence and contact maps "
-                    " as pygraphviz AGraph objects. Either install "
-                    "pygraphviz or set cleanup=False to retain "
-                    "dot files.")
+            raise
         else:
             warnings.warn(
-                    "pygraphviz could not be imported so no AGraph "
-                    "objects returned (returning None); "
+                    "The pydot library could not be "
+                    "imported, so no MultiGraph "
+                    "object returned (returning None); "
                     "contact/influence maps available at %s" %
                     base_directory)
             cmap = None
@@ -352,13 +365,10 @@ def contact_map(model, **kwargs):
 
     Returns
     -------
-    pygraphviz AGraph object containing the contact map.
-    The contact map can be rendered as a pdf using the dot layout program
-    as follows::
-
-        contact_map.draw('contact_map.pdf', prog='dot')
+    networkx MultiGraph object containing the contact map. For details on
+    viewing the contact map graphically see :func:`run_static_analysis` (notes
+    section).
     """
-
     kasa_result = run_static_analysis(model, influence_map=False,
                                     contact_map=True, **kwargs)
     return kasa_result.contact_map
@@ -377,11 +387,9 @@ def influence_map(model, **kwargs):
 
     Returns
     -------
-    pygraphviz AGraph object containing the influence map.
-    The influence map can be rendered as a pdf using the dot layout program
-    as follows::
-
-        influence_map.draw('influence_map.pdf', prog='dot')
+    networkx MultiGraph object containing the influence map. For details on
+    viewing the influence map graphically see :func:`run_static_analysis`
+    (notes section).
     """
 
     kasa_result = run_static_analysis(model, influence_map=True,

@@ -3,8 +3,10 @@ import sys
 import copy
 import numpy as np
 from pysb import Monomer, Parameter, Initial, Observable, Rule, Expression
-from pysb.simulator import ScipyOdeSimulator, SimulatorException
+from pysb.simulator import ScipyOdeSimulator
 from pysb.examples import robertson, earm_1_0
+import unittest
+import pandas as pd
 
 
 class TestScipySimulatorBase(object):
@@ -54,27 +56,9 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
         simres = self.sim.run()
         assert simres._nsims == 1
 
-    def test_vode_jac_solver_run(self):
-        """Test vode and analytic jacobian."""
-        args = {'model': self.model,
-                'tspan': self.time,
-                'integrator': 'vode',
-                'use_analytic_jacobian': True}
-        solver_vode_jac = ScipyOdeSimulator(**args)
-        res1 = solver_vode_jac.run()
-        # Test again with analytic jacobian
-        if ScipyOdeSimulator._use_inline:
-            ScipyOdeSimulator._use_inline = False
-            sim = ScipyOdeSimulator(**args)
-            simres = sim.run()
-            assert simres.species.shape[0] == args['tspan'].shape[0]
-            assert np.allclose(res1.dataframe, simres.dataframe)
-            ScipyOdeSimulator._use_inline = True
-
-        # Test again using theano
-        solver = ScipyOdeSimulator(use_theano=True, **args)
-        simres = solver.run()
-        assert np.allclose(res1.dataframe, simres.dataframe)
+    @raises(ValueError)
+    def test_invalid_init_kwarg(self):
+        ScipyOdeSimulator(self.model, tspan=self.time, spam='eggs')
 
     def test_lsoda_solver_run(self):
         """Test lsoda."""
@@ -92,9 +76,10 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
     def test_y0_as_list(self):
         """Test y0 with list of initial conditions"""
         # Test the initials getter method before anything is changed
-        assert np.allclose(self.sim.initials[0][0:2],
-                           [ic[1].value for ic in
-                            self.model.initial_conditions])
+        assert np.allclose(
+            self.sim.initials[0][0:2],
+            [ic.value.value for ic in self.model.initials]
+        )
 
         initials = [10, 20, 0]
         simres = self.sim.run(initials=initials)
@@ -128,6 +113,18 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
                                self.mon('B')(b=None): 0})
         assert np.allclose(simres.observables['AB_complex'][0], 100)
 
+    def test_y0_as_dataframe(self):
+        initials_dict = {self.mon('A')(a=None): [0],
+                         self.mon('B')(b=1) % self.mon('A')(a=1): [100],
+                         self.mon('B')(b=None): [0]}
+        initials_df = pd.DataFrame(initials_dict)
+        simres = self.sim.run(initials=initials_df)
+        assert np.allclose(simres.observables['AB_complex'][0], 100)
+
+    @raises(ValueError)
+    def test_y0_as_pandas_series(self):
+        self.sim.run(initials=pd.Series())
+
     @raises(TypeError)
     def test_y0_non_numeric_value(self):
         """Test y0 with non-numeric value."""
@@ -138,6 +135,14 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
         simres = self.sim.run(param_values={'kbindAB': 0})
         # kbindAB=0 should ensure no AB_complex is produced.
         assert np.allclose(simres.observables["AB_complex"], 0)
+
+    def test_param_values_as_dataframe(self):
+        simres = self.sim.run(param_values=pd.DataFrame({'kbindAB': [0]}))
+        assert np.allclose(simres.observables['AB_complex'], 0)
+
+    @raises(ValueError)
+    def test_param_values_as_pandas_series(self):
+        self.sim.run(param_values=pd.Series())
 
     def test_param_values_as_list_ndarray(self):
         """Test param_values as a list and ndarray."""
@@ -171,6 +176,39 @@ class TestScipySimulatorSingle(TestScipySimulatorBase):
         df = self.sim.run().dataframe
 
 
+class TestScipyOdeCompilerTests(TestScipySimulatorBase):
+    """Test vode and analytic jacobian with different compiler backends"""
+    def setUp(self):
+        super(TestScipyOdeCompilerTests, self).setUp()
+        self.args = {'model': self.model,
+                     'tspan': self.time,
+                     'integrator': 'vode',
+                     'use_analytic_jacobian': True}
+
+        self.python_sim = ScipyOdeSimulator(compiler='python', **self.args)
+        self.python_res = self.python_sim.run()
+
+    def test_cython(self):
+        sim = ScipyOdeSimulator(compiler='cython', **self.args)
+        simres = sim.run()
+        assert simres.species.shape[0] == self.args['tspan'].shape[0]
+        assert np.allclose(self.python_res.dataframe, simres.dataframe)
+
+    def test_theano(self):
+        sim = ScipyOdeSimulator(compiler='theano', **self.args)
+        simres = sim.run()
+        assert simres.species.shape[0] == self.args['tspan'].shape[0]
+        assert np.allclose(self.python_res.dataframe, simres.dataframe)
+
+    @unittest.skipIf(sys.version_info.major >= 3, 'weave not available for '
+                                                  'Python 3')
+    def test_weave(self):
+        sim = ScipyOdeSimulator(compiler='weave', **self.args)
+        simres = sim.run()
+        assert simres.species.shape[0] == self.args['tspan'].shape[0]
+        assert np.allclose(self.python_res.dataframe, simres.dataframe)
+
+
 class TestScipySimulatorSequential(TestScipySimulatorBase):
     def test_sequential_initials(self):
         simres = self.sim.run()
@@ -184,6 +222,24 @@ class TestScipySimulatorSequential(TestScipySimulatorBase):
         assert np.allclose(simres.initials, new_initials)
         # Check that the single-run initials were removed after the run
         assert np.allclose(self.sim.initials, orig_initials)
+
+    def test_sequential_initials_dict_then_list(self):
+        A, B = self.model.monomers
+
+        base_sim = ScipyOdeSimulator(
+            self.model,
+            initials={A(a=None): 10, B(b=None): 20})
+
+        assert np.allclose(base_sim.initials, [10, 20, 0])
+        assert len(base_sim.initials_dict) == 2
+
+        # Now set initials using a list, which should overwrite the dict
+        base_sim.initials = [30, 40, 50]
+
+        assert np.allclose(base_sim.initials, [30, 40, 50])
+        assert np.allclose(
+            sorted([x[0] for x in base_sim.initials_dict.values()]),
+            base_sim.initials)
 
     def test_sequential_param_values(self):
         orig_param_values = self.sim.param_values
@@ -348,13 +404,11 @@ def test_robertson_integration():
     sim = ScipyOdeSimulator(robertson.model)
     simres = sim.run(tspan=t)
     assert simres.species.shape[0] == t.shape[0]
-    if ScipyOdeSimulator._use_inline:
+    if sim._compiler != 'python':
         # Also run without inline
-        ScipyOdeSimulator._use_inline = False
-        sim = ScipyOdeSimulator(robertson.model, tspan=t)
+        sim = ScipyOdeSimulator(robertson.model, tspan=t, compiler='python')
         simres = sim.run()
         assert simres.species.shape[0] == t.shape[0]
-        ScipyOdeSimulator._use_inline = True
 
 
 def test_earm_integration():
@@ -363,11 +417,9 @@ def test_earm_integration():
     # Run with or without inline
     sim = ScipyOdeSimulator(earm_1_0.model, tspan=t)
     sim.run()
-    if ScipyOdeSimulator._use_inline:
+    if sim._compiler != 'python':
         # Also run without inline
-        ScipyOdeSimulator._use_inline = False
-        ScipyOdeSimulator(earm_1_0.model, tspan=t).run()
-        ScipyOdeSimulator._use_inline = True
+        ScipyOdeSimulator(earm_1_0.model, tspan=t, compiler='python').run()
 
 
 @raises(ValueError)

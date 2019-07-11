@@ -1241,7 +1241,7 @@ class EnergyPattern(Component):
     def __repr__(self):
         ret = '%s(%s, %s, %s)' % \
             (self.__class__.__name__, repr(self.name),
-             repr(self.pattern), self.energy.name)
+             repr(self.pattern), repr(self.energy))
         return ret
 
 

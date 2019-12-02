@@ -608,7 +608,7 @@ class ComplexPattern(object):
             all(mp.is_site_concrete() for mp in self.monomer_patterns)
         return mp_concrete_ok or compartment_ok
 
-    def _as_graph(self):
+    def _as_graph(self, mp_alignment=None, prefix='mp'):
         """
         Return the ComplexPattern represented as a networkx graph
 
@@ -657,8 +657,15 @@ class ComplexPattern(object):
         .. [Blinov2006] https://link.springer.com/chapter/10.1007%2F11905455_5
         .. [Faeder2009] https://www.csb.pitt.edu/Faculty/Faeder/Publications/Reprints/Faeder_2009.pdf
         """
-        if self._graph is not None:
+        if self._graph is not None and mp_alignment is None:
             return self._graph
+
+        if mp_alignment is None:
+            mp_alignment = range(len(self.monomer_patterns))
+
+        if len(mp_alignment) != len(self.monomer_patterns):
+            raise ValueError('Length of mp_alignment_indices does not match'
+                             'the number of complex patterns')
 
         NO_BOND = 'NoBond'
 
@@ -692,8 +699,9 @@ class ComplexPattern(object):
         if self.compartment:
             species_cpt_node_id = add_or_get_compartment_node(self.compartment)
 
-        for mp in self.monomer_patterns:
-            mon_node_id = next(node_count)
+        for imp, mp in zip(mp_alignment, self.monomer_patterns):
+            mon_node_id = f'{prefix}{imp}_monomer'
+            unbound_sites = []
             g.add_node(mon_node_id, id=mp.monomer)
             if mp.compartment or self.compartment:
                 cpt_node_id = add_or_get_compartment_node(mp.compartment or
@@ -701,7 +709,8 @@ class ComplexPattern(object):
                 g.add_edge(mon_node_id, cpt_node_id)
 
             for site, state_or_bond in mp.site_conditions.items():
-                mon_site_id = next(node_count)
+                site_index=mp.monomer.sites.index(site)
+                mon_site_id = f'{prefix}{imp}_s{site_index}'
                 g.add_node(mon_site_id, id=site)
                 g.add_edge(mon_node_id, mon_site_id)
                 state = None
@@ -719,27 +728,26 @@ class ComplexPattern(object):
 
                 if state_or_bond is ANY or bond_num is ANY:
                     bond_num = any_bond_tester
-                    any_bond_tester_id = next(node_count)
+                    any_bond_tester_id = f'{prefix}{imp}_s{site_index}b'
                     g.add_node(any_bond_tester_id, id=any_bond_tester)
                     g.add_edge(mon_site_id, any_bond_tester_id)
 
                 if state is not None:
-                    mon_site_state_id = next(node_count)
+                    mon_site_state_id = f'{prefix}{imp}_s{site_index}c'
                     g.add_node(mon_site_state_id, id=state)
                     g.add_edge(mon_site_id, mon_site_state_id)
 
                 if bond_num is None:
-                    bond_edges[NO_BOND].append(mon_site_id)
+                    unbound_sites.append(mon_site_id)
                 elif isinstance(bond_num, int):
                     bond_edges[bond_num].append(mon_site_id)
 
-        # Unbound edges
-        unbound_sites = bond_edges.pop(NO_BOND, None)
-        if unbound_sites is not None:
-            no_bond_id = next(node_count)
-            g.add_node(no_bond_id, id=NO_BOND)
-            for unbound_site in unbound_sites:
-                g.add_edge(unbound_site, no_bond_id)
+                # Unbound edges
+                if unbound_sites:
+                    no_bond_id = f'{prefix}{imp}_unbound'
+                    g.add_node(no_bond_id, id=NO_BOND)
+                    for unbound_site in unbound_sites:
+                        g.add_edge(unbound_site, no_bond_id)
 
         # Add bond edges
         for site_nodes in bond_edges.values():
@@ -757,8 +765,10 @@ class ComplexPattern(object):
                         g.degree(species_cpt_node_id) == 0:
             g.remove_node(species_cpt_node_id)
 
-        self._graph = g
-        return self._graph
+        if mp_alignment is None:
+            self._graph = g
+
+        return g
 
     def is_equivalent_to(self, other):
         """
@@ -945,6 +955,39 @@ class ReactionPattern(object):
         self.complex_patterns = complex_patterns
         from pysb.pattern import check_dangling_bonds
         check_dangling_bonds(self)
+        self._graph = None
+
+    def _as_graph(self, mp_alignment=None, prefix='mp'):
+
+        if self._graph is not None and mp_alignment is None:
+            return self._graph
+
+        def autoinc():
+            i = 0
+            while True:
+                yield i
+                i += 1
+        mp_count = autoinc()
+
+        if mp_alignment is None:
+            mp_alignment = [
+                [next(mp_count) for _ in cp.monomer_patterns]
+                for cp in self.complex_patterns
+            ]
+
+        if len(mp_alignment) != len(self.complex_patterns):
+            raise ValueError('Length of mp_alignment does not match'
+                             'the number of complex patterns')
+
+        graph = nx.union_all([
+            cp._as_graph(mp_alignment=mp_alignment[icp], prefix=prefix)
+            for icp, cp in enumerate(self.complex_patterns)
+        ])
+
+        if mp_alignment is None:
+            self._graph = graph
+
+        return graph
 
     def __add__(self, other):
         if isinstance(other, MonomerPattern):

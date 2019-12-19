@@ -1,11 +1,16 @@
-from pysb.network_expansion import partial_network_expansion
+from pysb.network_expansion import NetworkExpansion
 from pysb.bng import generate_equations
 from pysb import (
     Model, Monomer, Initial, Rule, EnergyPattern, Expression, Parameter,
     ComplexPattern
 )
 
+from pysb.pattern import match_complex_pattern
+
 import sympy as sp
+
+import re
+
 
 def test_enzymatic_catalysis():
     model = Model()
@@ -70,11 +75,49 @@ def test_enzymatic_catalysis():
 
     generate_equations(model, verbose=True)
 
-    species, reactions = partial_network_expansion(model, [
+    network = NetworkExpansion(model)
+    network.generate([
         ep.pattern for ep in model.energypatterns
     ])
 
-    assert len(species) == len(model.species)
-    assert len(reactions) == len(model.reactions)
+    validate_network(model, network)
 
 
+def validate_network(model, network):
+    assert len(network.species) == len(model.species)
+    species_mapper = {
+        ispecies_network: next((
+            ispecies_model
+            for ispecies_model, species_model in enumerate(model.species)
+            if match_complex_pattern(species_network, species_model)
+        ), None)
+        for ispecies_network, species_network in enumerate(network.species)
+    }
+    for mapping in species_mapper.values():
+        assert mapping is not None
+    assert len(network.reactions) == len(model.reactions)
+    subs = {
+        sp.Symbol(rate.name): sp.powdenest(sp.logcombine(
+            rate.expand_expr(expand_observables=True), force=True
+        ), force=True)
+        for rate in model.expressions
+        if re.search(r'\_local[0-9]+$', rate.name)
+    }
+    reaction_mapper = {
+        ireaction_network: next((
+            reaction_network['rate'] - reaction_model['rate'].subs(subs)
+            for ireaction_model, reaction_model in enumerate(model.reactions)
+            if reaction_network['rule'].replace('__reverse', '') ==
+               reaction_model['rule'][0]
+            and reaction_network['rule'].endswith('__reverse') ==
+               reaction_model['reverse'][0]
+            and sorted([educt for educt in reaction_model['reactants']]) ==
+                sorted([species_mapper[educt] for educt in reaction_network['educts']])
+            and sorted([product for product in reaction_model['products']]) ==
+                sorted([species_mapper[educt] for educt in reaction_network[
+                    'products']])
+        ), None)
+        for ireaction_network, reaction_network in enumerate(network.reactions)
+    }
+    for mapping in reaction_mapper.values():
+        assert mapping is not None

@@ -664,7 +664,7 @@ class ComplexPattern(object):
             mp_alignment = range(len(self.monomer_patterns))
 
         if len(mp_alignment) != len(self.monomer_patterns):
-            raise ValueError('Length of mp_alignment_indices does not match'
+            raise ValueError('Length of mp_alignment_indices does not match '
                              'the number of complex patterns')
 
         NO_BOND = 'NoBond'

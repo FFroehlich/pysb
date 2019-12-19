@@ -14,177 +14,416 @@ from networkx.algorithms.isomorphism import categorical_node_match
 from collections import ChainMap, Counter
 
 
-def partial_network_expansion(model, seeds):
-    reactions = []
-    rule_matches = [
-        {
-            'name': f'{rule.name}{"__reverse" if reverse else ""}',
-            'rule': rule.name,
-            'reverse': reverse,
-            'reactant_pattern':
-                rule.product_pattern if reverse
-                else rule.reactant_pattern,
-            'product_pattern':
-                rule.reactant_pattern if reverse
-                else rule.product_pattern,
-            'rate':
-                None if rule.energy
-                else rule.rate_reverse if reverse
-                else rule.rate_forward,
-            'energy': rule.energy,
-            'phi':
-                rule.rate_forward if rule.energy
-                else None,
-            'Ea0':
-                rule.rate_reverse if rule.energy
-                else None,
-            'matches':
-                np.zeros((len(rule.product_pattern.complex_patterns), 0))
-                if reverse
-                else np.zeros((len(rule.reactant_pattern.complex_patterns), 0))
-        }
-        for rule in model.rules
-        for reverse in [True, False]
-        if reverse == rule.is_reversible or not reverse
-    ]
-    species = seeds
-    index_added_species = list(range(len(seeds)))
-    index_updated_species = index_added_species
-    iterations = 0
-    print('Partial Network Expansion')
-    while len(index_updated_species):
-        print(f'Iteration {iterations}:')
-        for rule in rule_matches:
-            if len(rule['reactant_pattern'].complex_patterns) == 0:
-                continue
-            # extend match matrix to added species
-            rule['matches'] = np.concatenate(
-                (
-                    rule['matches'],
-                    get_matching_patterns(
-                        rule['reactant_pattern'],
-                        [species[i] for i in index_added_species]
-                    )
-                ), axis=1
+class NetworkExpansion:
+    def __init__(self, model):
+        self.model = model
+        self.reactions = []
+        self.new_reactions = []
+        self.species = []
+
+        self.initialize_reaction_generators()
+
+        self.index_added_species = set()
+        self.index_updated_species = set()
+        self.index_old_species = set()
+        self.interations = 0
+
+    @property
+    def nspecies(self):
+        return len(self.species)
+
+    def generate(self, seeds):
+        self.index_added_species = set(self.add_species(seeds))
+        self.index_updated_species = self.index_added_species
+        self.iterations = 0
+
+        print('Partial Network Expansion')
+        while len(self.index_updated_species):
+            print(f'Iteration {self.iterations}:')
+
+            reactions = []
+            self.update_reaction_generators_added_species()
+
+            for generator in self.reaction_generators:
+
+                rule_reactions = generator.generate_reactions(
+                    self.species, self.index_updated_species,
+                    self.index_old_species
+                )
+
+                if len(rule_reactions):
+                    print(f'Rule {generator.name}: {len(rule_reactions)} new '
+                          f'reactions')
+                reactions.extend(rule_reactions)
+
+            self.index_updated_species = set()
+            self.index_added_species = set()
+            # loop over all the reactions
+            while len(reactions):
+                reaction = reactions.pop(0)
+                # for every produces species, check if it is already present in
+                # the list of species
+                products = self.add_species(reaction['product_patterns'])
+
+                reaction['products'] = tuple(products)
+                self.reactions.append(reaction)
+
+            if len(self.index_updated_species) == 0:
+                print('Expansion complete')
+            self.iterations += 1
+
+    def add_species(self, candidates):
+        species_indices = []
+        for cand in candidates:
+            species_index = next((
+                ispecie
+                for ispecie, specie in enumerate(self.species)
+                if match_complex_pattern(specie, cand)
+            ), None)
+            if species_index is None:
+                # no match was found in existing species, add the species
+                # and update added/updated species
+                species_indices.append(self.nspecies)
+                self.add_specie(cand)
+            else:
+                species_indices.append(species_index)
+                # check if the new pattern is more specific
+                if not match_complex_pattern(cand,
+                                             self.species[species_index]):
+                    self.update_specie(cand, species_index)
+        return species_indices
+
+    def add_specie(self, specie):
+        self.index_added_species.add(self.nspecies)
+        self.index_updated_species.add(self.nspecies)
+        self.species.append(specie)
+
+    def update_specie(self, specie, specie_index):
+        # replace old pattern by more specific pattern
+        self.species[specie_index] = specie
+        self.index_updated_species.add(specie_index)
+
+        self.update_reaction_generators_updated_species(specie_index)
+
+        # remove reactions that used the less specific species,
+        # we will regenerate more specific implementations
+        # of these reactions in the next iteration
+        for ir, r in reversed(list(enumerate(self.reactions))):
+            if specie_index in list(
+                    r['educts'] + r['products']
+            ):
+                del self.reactions[ir]
+
+        for ir, r in reversed(list(enumerate(self.new_reactions))):
+            if specie_index in list(r['educts']):
+                del self.new_reactions[ir]
+
+    def initialize_reaction_generators(self):
+        self.reaction_generators = [
+            ReactionGenerator(rule, reverse, self.model.energypatterns)
+            for rule in self.model.rules
+            for reverse in [True, False]
+            if reverse == rule.is_reversible or not reverse
+        ]
+
+    def update_reaction_generators_added_species(self):
+        for generator in self.reaction_generators:
+            generator.add_matches(
+                [self.species[i] for i in sorted(self.index_added_species)]
             )
-        index_old_species = [i for i in range(len(species))
-                             if i not in index_updated_species]
-        new_reactions = []
-        for rule in rule_matches:
-            rule_reactions = []
-            if rule['matches'].shape[0] == 0:
-                continue
 
-            old_matches = rule['matches'].copy()
-            old_matches[:, index_updated_species] = False
-            new_matches = rule['matches'].copy()
-            new_matches[:, index_old_species] = False
+        self.index_old_species |= {
+            i for i in range(len(self.species))
+            if i not in self.index_updated_species
+        }
 
-            # here we need to account for the full combinatorial space of
-            # possible combinations of new and old matches. We loop over the
-            # number of new matches and then use itertools to select all
-            # possible combinations
-            for new_match_count in range(1, sum(new_matches.any(axis=1))+1):
-                for new_match_sel in itertools.combinations(
+    def update_reaction_generators_updated_species(self, specie_index):
+        if specie_index in self.index_added_species:
+            # if we are replacing a newly added species,
+            # we don't have to update the match matrix yet
+            return
+        for generator in self.reaction_generators:
+            generator.update_matches(self.species[specie_index], specie_index)
+
+
+class ReactionGenerator:
+    def __init__(self, rule, reverse, energypatterns):
+        self.name = f'{rule.name}{"__reverse" if reverse else ""}'
+        self.rule = rule.name,
+        self.reverse = reverse,
+        self.reactant_pattern = rule.product_pattern if reverse else \
+            rule.reactant_pattern
+        self.product_pattern = rule.reactant_pattern if reverse else \
+            rule.product_pattern
+        self.phi = None
+        self.Ea0 = None
+        if reverse:
+            self.rate = rule.rate_reverse
+            self.matches = np.zeros(
+                (len(rule.product_pattern.complex_patterns), 0)
+            )
+        else:
+            self.rate = rule.rate_forward
+            self.matches = np.zeros(
+                (len(rule.reactant_pattern.complex_patterns), 0)
+            )
+
+        if rule.energy:
+            self.rate = None
+            self.phi = rule.rate_forward
+            self.Ea0 = rule.rate_reverse
+
+        self.graph_diff = GraphDiff(self)
+        self.energypatterns = energypatterns
+
+        self.is_pure_synthesis_rule = self.matches
+
+    def add_matches(self, species):
+        if self.is_pure_synthesis_rule:
+            return
+        self.matches = np.concatenate(
+            (
+                self.matches,
+                get_matching_patterns(
+                    self.reactant_pattern,
+                    species
+                )
+            ), axis=1
+        )
+
+    def update_matches(self, specie, specie_index):
+        if self.is_pure_synthesis_rule:
+            return
+        self.matches[:, specie_index] = \
+            get_matching_patterns(
+                self.reactant_pattern,
+                [specie]
+            )[:, 0]
+
+    def generate_reactions(self, species, index_updated_species,
+                           index_old_species):
+        rule_reactions = []
+        # here we need to account for the full combinatorial space of
+        # possible combinations of new and old matches. We loop over the
+        # number of new matches and then use itertools to select all
+        # possible combinations
+
+        old_matches = self.matches.copy()
+        old_matches[:, list(index_updated_species)] = False
+        new_matches = self.matches.copy()
+        new_matches[:, list(index_old_species)] = False
+
+        for new_match_count in range(1, sum(new_matches.any(axis=1)) + 1):
+            for new_match_sel in itertools.combinations(
                     np.where(new_matches.any(axis=1))[0],
                     r=new_match_count
-                ):
-                    # if educt index icol is in ie, we select all pattern
-                    # matches from newly generated species, otherwise,
-                    # we select a pattern matches from old
-                    educt_matches = [
-                        np.where(new_matches[irp, :])[0]
-                        if irp in new_match_sel
-                        else np.where(old_matches[irp, :])[0]
-                        for irp in range(rule['matches'].shape[0])
-                    ]
-                    # generate the reactions for the respective matches
-                    rule_reactions.extend(
-                        get_reactions_from_matches(
-                            educt_matches, rule, model.energypatterns,
-                            species
-                        )
-                    )
-
-            if len(rule_reactions):
-                print(f'Rule {rule["name"]}: {len(rule_reactions)} new '
-                      f'reactions')
-            new_reactions.extend(rule_reactions)
-
-        index_updated_species = []
-        index_added_species = []
-        # loop over all the reactions
-        while len(new_reactions):
-            reaction = new_reactions.pop(0)
-            products = []
-            # for every produces species, check if it is already present in
-            # the list of species
-            for specie_canditate in reaction['product_patterns']:
-                species_index = next(
-                    (
-                        ispecie
-                        for ispecie, specie in enumerate(species)
-                        if match_complex_pattern(
-                            specie, specie_canditate,
-                        )
-                    ),
-                    None
+            ):
+                # if educt index icol is in ie, we select all pattern
+                # matches from newly generated species, otherwise,
+                # we select a pattern matches from old
+                educt_matches = [
+                    np.where(new_matches[irp, :])[0]
+                    if irp in new_match_sel
+                    else np.where(old_matches[irp, :])[0]
+                    for irp in range(self.matches.shape[0])
+                ]
+                # generate the reactions for the respective matches
+                rule_reactions.extend(
+                    self.generate_reaction(educt_indices, species)
+                    for educt_indices in itertools.product(*educt_matches)
                 )
-                if species_index is None:
-                    # no match was found in existing species, add the species
-                    # and update added/updated species
-                    species.append(specie_canditate)
-                    index_added_species.append(len(species)-1)
-                    index_updated_species.append(len(species)-1)
-                    # store indexing for easy future access
-                    products.append(len(species)-1)
-                else:
-                    products.append(species_index)
-                    # check if the new pattern is more specific
-                    if not match_complex_pattern(
-                            specie_canditate, species[species_index]
-                    ):
-                        # replace old pattern by more specific pattern
-                        species[species_index] = specie_canditate
-                        index_updated_species.append(species_index)
+        return rule_reactions
 
-                        for rule in rule_matches:
-                            if rule['matches'].shape[0] == 0:
-                                # if the match matrix wasnt created yet, we
-                                # dont have to do anything
-                                continue
-                            if rule['matches'].shape[1] < species_index:
-                                # if we are replacing a newly added species,
-                                # we don't have to update the match matrix yet
-                                continue
-                            # update the matches
-                            rule['matches'][:, species_index] = \
-                                get_matching_patterns(
-                                    rule['reactant_pattern'],
-                                    [species[species_index]]
-                                )[:, 0]
+    def generate_reaction(self, educt_indices, species):
+        educts = [species[e] for e in educt_indices]
 
-                        # remove reactions that used the less specific species,
-                        # we will regenerate more specific implementations
-                        # of these reactions in the next iteration
-                        for ir, r in reversed(list(enumerate(reactions))):
-                            if species_index in list(
-                                    r['educts'] + r['products']
-                            ):
-                                del reactions[ir]
+        stat_factor = 1.0
+        for count in Counter(educt_indices).values():
+            stat_factor *= 1 / math.factorial(count)
 
-                        for ir, r in reversed(list(enumerate(new_reactions))):
-                            if species_index in list(r['educts']):
-                                del new_reactions[ir]
+        educt_mapping, mp_alignment_cp = self.compute_educt_mapping(educts)
+        self.graph_diff.apply_mapping(educt_mapping)
 
-            reaction['products'] = tuple(products)
-            reactions.append(reaction)
+        educt_graph = ReactionPattern(educts)._as_graph(
+            mp_alignment_cp
+        )
 
-        if len(index_updated_species) == 0:
-            print('Expansion complete')
-        iterations += 1
+        products = reaction_pattern_from_graph(
+            self.graph_diff.apply(educt_graph)
+        ).complex_patterns
 
-    return species, reactions
+        rate, energies = self.get_reaction_rate(
+            educts, products
+        )
+
+        reaction = {
+            'rule': self.name,
+            'product_patterns': products,
+            'educt_patterns': educts,
+            'rate': stat_factor * rate * np.prod([sp.Symbol(f'__s{ix}')
+                                                  for ix in educt_indices]),
+            'energies': energies,
+            'educts': tuple(educt_indices),
+        }
+        assert (len(educts) ==
+                len(self.reactant_pattern.complex_patterns))
+        assert (len(products) ==
+                len(self.product_pattern.complex_patterns))
+
+        return reaction
+
+    def get_reaction_rate(self, educts, products):
+        if self.rate is None:
+            energy_diffs = [
+                {
+                    'name': name,
+                    'count': sum(
+                        match_complex_pattern(ep.pattern, pattern,
+                                              count=True) /
+                        match_complex_pattern(ep.pattern, ep.pattern,
+                                              count=True)
+                        for pattern in products
+
+                    ) - sum(
+                        match_complex_pattern(ep.pattern, pattern,
+                                              count=True) /
+                        match_complex_pattern(ep.pattern, ep.pattern,
+                                              count=True)
+                        for pattern in educts
+                    ),
+                    'energy': ep.energy
+                }
+                for name, ep in self.energypatterns.items()
+            ]
+            energies = set(
+                diff['name'] for diff in energy_diffs
+                if diff['count'] != 0.0
+            )
+            deltadeltaG = sum(
+                diff['energy'] * diff['count'] for diff in energy_diffs
+                if diff['count'] != 0.0
+            )
+            if self.reverse:
+                rate = sp.exp(-self.Ea0 + self.phi * deltadeltaG)
+            else:
+                rate = sp.exp(-self.Ea0 + (1 - self.phi) * deltadeltaG)
+
+            subs = []
+            for a in rate.atoms():
+                if isinstance(a, Expression):
+                    subs.append((a, a.expand_expr(
+                        expand_observables=True)))
+                elif isinstance(a, Observable):
+                    subs.append((a, a.expand_obs()))
+            rate = rate.subs(subs)
+            rate = sp.powdenest(sp.logcombine(rate, force=True),
+                                force=True)
+        else:
+            energies = set()
+            rate = self.rate
+        return rate, energies
+
+    def compute_educt_mapping(self, educts):
+        node_matcher = categorical_node_match('id', default=None)
+
+        def autoinc():
+            i = 0
+            while True:
+                yield i
+                i += 1
+
+        # alignment of mps in cps of pattern allows merging of mappings through
+        # ChainMap, also enables us to apply the graph diff to the graph of the
+        # reactant pattern of all cps in pattern in the end
+        mp_count_pattern = autoinc()
+        mp_alignment_cp = [
+            [next(mp_count_pattern) for _ in cp.monomer_patterns]
+            for cp in educts
+        ]
+
+        matches = [
+            GraphMatcher(
+                cp._as_graph(mp_alignment_cp[icp]),
+                rp._as_graph(self.graph_diff.mp_alignment_rp[icp],
+                             prefix='rp'),
+                node_match=node_matcher
+            )
+            for icp, (rp, cp)
+            in enumerate(zip(self.reactant_pattern.complex_patterns,
+                             educts))
+        ]
+
+        for rpmatch in matches:
+            assert (rpmatch.subgraph_is_isomorphic())
+
+        # invert and merge mapping
+        return dict(ChainMap(*[
+            dict(zip(match.mapping.values(), match.mapping.keys()))
+            for match in matches
+        ])), mp_alignment_cp
+
+
+class GraphDiff:
+    def __init__(self, rg):
+        self.mp_alignment_rp, self.mp_alignment_pp = align_monomer_indices(
+            rg.reactant_pattern, rg.product_pattern
+        )
+        rp_graph = rg.reactant_pattern._as_graph(prefix='rp')
+        pp_graph = rg.product_pattern._as_graph(
+            prefix='rp', mp_alignment=self.mp_alignment_pp
+        )
+
+        self.removed_nodes = tuple(
+            n for n, d in rp_graph.nodes(data=True)
+            if n not in pp_graph
+               or n in pp_graph and pp_graph.nodes[n]['id'] != d['id']
+        )
+        rp_graph.remove_nodes_from(self.removed_nodes)
+        self.added_nodes = tuple(
+            (n, d) for n, d in pp_graph.nodes(data=True)
+            if n not in rp_graph
+        )
+        rp_graph.add_nodes_from(self.added_nodes)
+        self.removed_edges = tuple(
+            nx.difference(rp_graph, pp_graph).edges()
+        )
+        self.added_edges = tuple(
+            nx.difference(pp_graph, rp_graph).edges()
+        )
+        self.mapped_removed_edges = ()
+        self.mapped_added_edges = ()
+        self.mapped_removed_nodes = ()
+        self.mapped_added_nodes = ()
+        self.has_mapping = False
+
+    def apply_mapping(self, mapping):
+        for attr in ['removed_edges', 'added_edges']:
+            self.__setattr__(
+                f'mapped_{attr}',
+                tuple(
+                    (mapping.get(e[0], e[0]), mapping.get(e[1], e[1]))
+                    for e in self.__getattribute__(attr)
+                )
+            )
+
+        self.mapped_removed_nodes = tuple(
+            mapping[n]
+            for n in self.removed_nodes
+        )
+        self.mapped_added_nodes = tuple(
+            (mapping.get(n, n), d)
+            for n, d in self.added_nodes
+        )
+        self.has_mapping = True
+
+    def apply(self, ingraph):
+        assert self.has_mapping
+        outgraph = ingraph.copy()
+        outgraph.remove_nodes_from(self.mapped_removed_nodes)
+        outgraph.add_nodes_from(self.mapped_added_nodes)
+        outgraph.add_edges_from(self.mapped_added_edges)
+        outgraph.remove_edges_from(self.mapped_removed_edges)
+        return outgraph
 
 
 def get_matching_patterns(reaction_pattern, species):
@@ -197,185 +436,6 @@ def get_matching_patterns(reaction_pattern, species):
             ]
             for cp in reaction_pattern.complex_patterns
     ])
-
-
-def get_reactions_from_matches(educt_matches, rule, energy_patterns, species):
-    return [
-        apply_conversion_to_complex_patterns(
-            rule, energy_patterns,
-            educt_indices, species
-        )
-        for educt_indices in itertools.product(*educt_matches)
-    ]
-
-
-def apply_conversion_to_complex_patterns(rule, energy_patterns,
-                                         educt_indices, species):
-    complexpatterns = [species[e] for e in educt_indices]
-
-    stat_factor = 1.0
-    for count in Counter(educt_indices).values():
-        stat_factor *= 1 / math.factorial(count)
-
-    mp_alignment_rp, mp_alignment_pp = align_monomer_indices(
-        rule['reactant_pattern'], rule['product_pattern']
-    )
-
-    rp_graph = rule['reactant_pattern']._as_graph(
-        prefix='rp'
-    )
-    pp_graph = rule['product_pattern']._as_graph(
-        prefix='rp', mp_alignment=mp_alignment_pp
-    )
-
-    graph_diff = dict()
-    graph_diff['removed_nodes'] = [
-        n for n, d in rp_graph.nodes(data=True)
-        if n not in pp_graph
-        or n in pp_graph and pp_graph.nodes[n]['id'] != d['id']
-    ]
-    rp_graph.remove_nodes_from(graph_diff['removed_nodes'])
-    graph_diff['added_nodes'] = [
-        (n, d) for n, d in pp_graph.nodes(data=True)
-        if n not in rp_graph
-    ]
-    rp_graph.add_nodes_from(graph_diff['added_nodes'])
-    graph_diff['removed_edges'] = nx.difference(rp_graph, pp_graph).edges()
-    graph_diff['added_edges'] = nx.difference(pp_graph, rp_graph).edges()
-
-    node_matcher = categorical_node_match('id', default=None)
-
-    def autoinc():
-        i = 0
-        while True:
-            yield i
-            i += 1
-
-    # alignment of mps in cps of pattern allows merging of mappings through
-    # ChainMap, also enables us to apply the graph diff to the graph of the
-    # reactant pattern of all cps in pattern in the end
-    mp_count_pattern = autoinc()
-    mp_alignment_cp = [
-        [next(mp_count_pattern) for _ in cp.monomer_patterns]
-        for cp in complexpatterns
-    ]
-
-    matches = [
-        GraphMatcher(
-            cp._as_graph(mp_alignment_cp[icp]),
-            rp._as_graph(mp_alignment_rp[icp], prefix='rp'),
-            node_match=node_matcher
-        )
-        for icp, (rp, cp)
-        in enumerate(zip(rule['reactant_pattern'].complex_patterns,
-                         complexpatterns))
-    ]
-    reactions = []
-
-    for rpmatch in matches:
-        assert(rpmatch.subgraph_is_isomorphic())
-
-    # invert and merge mapping
-    full_mapping = dict(ChainMap(*[
-        dict(zip(match.mapping.values(), match.mapping.keys()))
-        for match in matches
-    ]))
-    mapped_diff = map_graph_diff(graph_diff, full_mapping)
-
-    educt_graph = ReactionPattern(complexpatterns)._as_graph(
-        mp_alignment_cp
-    )
-    products = reaction_pattern_from_graph(
-        apply_graph_diff(educt_graph, mapped_diff)
-    ).complex_patterns
-
-    if rule['energy']:
-        energy_diffs = [
-            {
-                'name': name,
-                'count': sum(
-                    match_complex_pattern(ep.pattern, pattern, count=True) /
-                    match_complex_pattern(ep.pattern, ep.pattern, count=True)
-                    for pattern in products
-
-                ) - sum(
-                    match_complex_pattern(ep.pattern, pattern, count=True) /
-                    match_complex_pattern(ep.pattern, ep.pattern, count=True)
-                    for pattern in complexpatterns
-                ),
-                'energy': ep.energy
-            }
-            for name, ep in energy_patterns.items()
-        ]
-        energies = set(
-            diff['name'] for diff in energy_diffs
-            if diff['count'] != 0.0
-        )
-        deltadeltaG = sum(
-            diff['energy']*diff['count'] for diff in energy_diffs
-            if diff['count'] != 0.0
-        )
-        if rule['reverse']:
-            rate = sp.exp(-rule['Ea0'] + rule['phi'] * deltadeltaG)
-        else:
-            rate = sp.exp(-rule['Ea0'] + (1 - rule['phi']) * deltadeltaG)
-
-        subs = []
-        for a in rate.atoms():
-            if isinstance(a, Expression):
-                subs.append((a, a.expand_expr(
-                    expand_observables=True)))
-            elif isinstance(a, Observable):
-                subs.append((a, a.expand_obs()))
-        rate = rate.subs(subs)
-        rate = sp.powdenest(sp.logcombine(rate, force=True), force=True)
-    else:
-        energies = set()
-        rate = rule['rate']
-
-    reaction = {
-        'rule': rule['name'],
-        'product_patterns': products,
-        'educt_patterns': complexpatterns,
-        'rate': stat_factor*rate,
-        'energies': energies,
-        'educts': tuple(educt_indices),
-    }
-    assert (len(complexpatterns) ==
-            len(rule['reactant_pattern'].complex_patterns))
-    assert (len(products) ==
-            len(rule['product_pattern'].complex_patterns))
-
-    return reaction
-
-
-def map_graph_diff(diff, mapping):
-    mapped_diff = dict()
-
-    for edges in ['removed_edges', 'added_edges']:
-        mapped_diff[edges] = [
-            (mapping.get(e[0], e[0]), mapping.get(e[1], e[1]))
-            for e in diff[edges]
-        ]
-
-    mapped_diff['removed_nodes'] = [
-        mapping[n]
-        for n in diff['removed_nodes']
-    ]
-    mapped_diff['added_nodes'] = [
-        (mapping.get(n, n), d)
-        for n, d in diff['added_nodes']
-    ]
-    return mapped_diff
-
-
-def apply_graph_diff(graph, diff):
-    outgraph = graph.copy()
-    outgraph.remove_nodes_from(diff['removed_nodes'])
-    outgraph.add_nodes_from(diff['added_nodes'])
-    outgraph.add_edges_from(diff['added_edges'])
-    outgraph.remove_edges_from(diff['removed_edges'])
-    return outgraph
 
 
 def align_monomer_indices(reactantpattern, productpattern):

@@ -4,12 +4,55 @@ from pysb import (
     Model, Monomer, Initial, Rule, EnergyPattern, Expression, Parameter,
     ComplexPattern
 )
-
+from .test_importers import _bngl_location, model_from_bngl
 from pysb.pattern import match_complex_pattern
 
 import sympy as sp
 
 import re
+
+
+def bngl_compare_network_generation(bng_file):
+    m = model_from_bngl(bng_file)
+
+    generate_equations(m, verbose=True)
+
+    network = NetworkExpansion(m)
+    network.generate([
+        init.pattern for init in m.initials
+    ])
+
+    #validate_network(m, network)
+
+
+def test_bng_models():
+    for filename in (#'CaOscillate_Func',
+                     #'continue',
+                     #'deleteMolecules',
+                     'egfr_net',
+                     #'empty_compartments_block',
+                     #'gene_expr',
+                     #'gene_expr_func',
+                     #'gene_expr_simple',
+                     #'isomerization',
+                     #'michment',
+                     ##'Motivating_example_cBNGL',
+                     #'motor',
+                     #'simple_system',
+                     #'test_compartment_XML',
+                     #'test_setconc',
+                     #'test_synthesis_cBNGL_simple',
+                     ##'test_synthesis_complex',
+                     ##'test_synthesis_complex_0_cBNGL',
+                     ##'test_synthesis_complex_source_cBNGL',
+                     #'test_synthesis_simple',
+                     ##'toy-jim',
+                     ##'univ_synth',
+                     #'visualize',
+                     #'statfactor',
+                     ):
+        full_filename = _bngl_location(filename)
+        yield (bngl_compare_network_generation, full_filename)
 
 
 def test_enzymatic_catalysis():
@@ -84,28 +127,36 @@ def test_enzymatic_catalysis():
 
 
 def validate_network(model, network):
-    assert len(network.species) == len(model.species)
     species_mapper = {
         ispecies_network: next((
             ispecies_model
             for ispecies_model, species_model in enumerate(model.species)
-            if match_complex_pattern(species_network, species_model)
+            if match_complex_pattern(species_network, species_model,
+                                     exact=True)
         ), None)
         for ispecies_network, species_network in enumerate(network.species)
     }
     for mapping in species_mapper.values():
         assert mapping is not None
-    assert len(network.reactions) == len(model.reactions)
-    subs = {
+    assert len(network.species) == len(model.species)
+    subs_rates = {
         sp.Symbol(rate.name): sp.powdenest(sp.logcombine(
             rate.expand_expr(expand_observables=True), force=True
         ), force=True)
         for rate in model.expressions
         if re.search(r'\_local[0-9]+$', rate.name)
     }
+    subs_states_temp = {
+        sp.Symbol(f'__s{ix}'): sp.Symbol(f'__x{ix}')
+        for ix in species_mapper
+    }
+    subs_states = {
+        sp.Symbol(f'__x{ix}'): sp.Symbol(f'__s{species_mapper[ix]}')
+        for ix in species_mapper
+    }
     reaction_mapper = {
         ireaction_network: next((
-            reaction_network['rate'] - reaction_model['rate'].subs(subs)
+            ireaction_model
             for ireaction_model, reaction_model in enumerate(model.reactions)
             if reaction_network['rule'].replace('__reverse', '') ==
                reaction_model['rule'][0]
@@ -116,8 +167,16 @@ def validate_network(model, network):
             and sorted([product for product in reaction_model['products']]) ==
                 sorted([species_mapper[educt] for educt in reaction_network[
                     'products']])
+            and sp.simplify(
+                reaction_network['rate'].subs(
+                    subs_states_temp
+                ).subs(subs_states) - reaction_model['rate'].subs(
+                    subs_rates
+                )
+            ).is_zero
         ), None)
         for ireaction_network, reaction_network in enumerate(network.reactions)
     }
     for mapping in reaction_mapper.values():
         assert mapping is not None
+    assert len(network.reactions) == len(model.reactions)

@@ -6,9 +6,11 @@ import sympy as sp
 import networkx as nx
 
 from pysb import (
-    ReactionPattern, ComplexPattern, Monomer, Expression, Observable
+    ReactionPattern, ComplexPattern, MonomerPattern, Monomer, Expression,
+    Observable, Compartment
 )
 from pysb.pattern import match_complex_pattern
+from pysb.core import NO_BOND
 from networkx.algorithms.isomorphism.vf2userfunc import GraphMatcher
 from networkx.algorithms.isomorphism import categorical_node_match
 from collections import ChainMap, Counter
@@ -28,6 +30,8 @@ class NetworkExpansion:
         self.index_old_species = set()
         self.interations = 0
 
+        self.full_expansion = False
+
     @property
     def nspecies(self):
         return len(self.species)
@@ -36,19 +40,34 @@ class NetworkExpansion:
         self.index_added_species = set(self.add_species(seeds))
         self.index_updated_species = self.index_added_species
         self.iterations = 0
+        self.full_expansion = all(seed.is_concrete() for seed in seeds)
 
         print('Partial Network Expansion')
         while len(self.index_updated_species):
             print(f'Iteration {self.iterations}:')
-
             reactions = []
+
+            if self.iterations == 0:
+                for generator in self.reaction_generators:
+                    if generator.is_pure_synthesis_rule:
+                        rule_reactions = [
+                            generator.generate_reaction([], self.species,
+                                                        self.model)
+                        ]
+
+                        if len(rule_reactions):
+                            print(
+                                f'Rule {generator.name}: {len(rule_reactions)}'
+                                f' new reactions')
+                        reactions.extend(rule_reactions)
+
             self.update_reaction_generators_added_species()
 
             for generator in self.reaction_generators:
 
                 rule_reactions = generator.generate_reactions(
                     self.species, self.index_updated_species,
-                    self.index_old_species
+                    self.index_old_species, self.model
                 )
 
                 if len(rule_reactions):
@@ -78,7 +97,8 @@ class NetworkExpansion:
             species_index = next((
                 ispecie
                 for ispecie, specie in enumerate(self.species)
-                if match_complex_pattern(specie, cand)
+                if match_complex_pattern(specie, cand,
+                                         exact=self.full_expansion)
             ), None)
             if species_index is None:
                 # no match was found in existing species, add the species
@@ -89,7 +109,8 @@ class NetworkExpansion:
                 species_indices.append(species_index)
                 # check if the new pattern is more specific
                 if not match_complex_pattern(cand,
-                                             self.species[species_index]):
+                                             self.species[species_index],
+                                             exact=self.full_expansion):
                     self.update_specie(cand, species_index)
         return species_indices
 
@@ -173,10 +194,14 @@ class ReactionGenerator:
             self.phi = rule.rate_forward
             self.Ea0 = rule.rate_reverse
 
-        self.graph_diff = GraphDiff(self)
         self.energypatterns = energypatterns
 
-        self.is_pure_synthesis_rule = self.matches
+        self.is_pure_synthesis_rule = \
+            len(rule.reactant_pattern.complex_patterns) == 0
+
+        self.delete_molecules = rule.delete_molecules
+
+        self.graph_diff = GraphDiff(self)
 
     def add_matches(self, species):
         if self.is_pure_synthesis_rule:
@@ -201,8 +226,11 @@ class ReactionGenerator:
             )[:, 0]
 
     def generate_reactions(self, species, index_updated_species,
-                           index_old_species):
+                           index_old_species, model):
+
         rule_reactions = []
+        if self.is_pure_synthesis_rule:
+            return rule_reactions
         # here we need to account for the full combinatorial space of
         # possible combinations of new and old matches. We loop over the
         # number of new matches and then use itertools to select all
@@ -213,7 +241,10 @@ class ReactionGenerator:
         new_matches = self.matches.copy()
         new_matches[:, list(index_old_species)] = False
 
-        for new_match_count in range(1, sum(new_matches.any(axis=1)) + 1):
+        for new_match_count in range(
+                max(self.matches.shape[0]-sum(old_matches.any(axis=1)), 1),
+                sum(new_matches.any(axis=1)) + 1
+        ):
             for new_match_sel in itertools.combinations(
                     np.where(new_matches.any(axis=1))[0],
                     r=new_match_count
@@ -227,18 +258,28 @@ class ReactionGenerator:
                     else np.where(old_matches[irp, :])[0]
                     for irp in range(self.matches.shape[0])
                 ]
+
+                # filter symmetric matches, we account for that by
+                # statfactor when generating rates
+                indice_sets = {
+                    tuple(np.unique(indices)): indices
+                    for indices in itertools.product(*educt_matches)
+                }
+
                 # generate the reactions for the respective matches
                 rule_reactions.extend(
-                    self.generate_reaction(educt_indices, species)
-                    for educt_indices in itertools.product(*educt_matches)
+                    self.generate_reaction(educt_indices, species, model)
+                    for educt_indices in indice_sets.values()
                 )
         return rule_reactions
 
-    def generate_reaction(self, educt_indices, species):
+    def generate_reaction(self, educt_indices, species, model):
         educts = [species[e] for e in educt_indices]
 
-        stat_factor = 1.0
+        stat_factor = 1
         for count in Counter(educt_indices).values():
+            if count == 1:
+                continue  # avoid conversion to float
             stat_factor *= 1 / math.factorial(count)
 
         educt_mapping, mp_alignment_cp = self.compute_educt_mapping(educts)
@@ -249,11 +290,11 @@ class ReactionGenerator:
         )
 
         products = reaction_pattern_from_graph(
-            self.graph_diff.apply(educt_graph)
+            self.graph_diff.apply(educt_graph, self.delete_molecules),
         ).complex_patterns
 
         rate, energies = self.get_reaction_rate(
-            educts, products
+            educts, products, model
         )
 
         reaction = {
@@ -265,14 +306,9 @@ class ReactionGenerator:
             'energies': energies,
             'educts': tuple(educt_indices),
         }
-        assert (len(educts) ==
-                len(self.reactant_pattern.complex_patterns))
-        assert (len(products) ==
-                len(self.product_pattern.complex_patterns))
-
         return reaction
 
-    def get_reaction_rate(self, educts, products):
+    def get_reaction_rate(self, educts, products, model):
         if self.rate is None:
             energy_diffs = [
                 {
@@ -300,13 +336,13 @@ class ReactionGenerator:
                 if diff['count'] != 0.0
             )
             deltadeltaG = sum(
-                diff['energy'] * diff['count'] for diff in energy_diffs
+                diff['energy'] * int(diff['count']) for diff in energy_diffs
                 if diff['count'] != 0.0
             )
-            if self.reverse:
-                rate = sp.exp(-self.Ea0 + self.phi * deltadeltaG)
+            if not self.reverse[0]:
+                rate = sp.exp(-self.Ea0 - self.phi * deltadeltaG)
             else:
-                rate = sp.exp(-self.Ea0 + (1 - self.phi) * deltadeltaG)
+                rate = sp.exp(-self.Ea0 - (1 - self.phi) * deltadeltaG)
 
             subs = []
             for a in rate.atoms():
@@ -320,7 +356,14 @@ class ReactionGenerator:
                                 force=True)
         else:
             energies = set()
-            rate = self.rate
+            subs = [
+                (expr, sp.Symbol(expr.name))
+                for expr in model.expressions
+            ] + [
+                (par, sp.Symbol(par.name))
+                for par in model.parameters
+            ]
+            rate = self.rate.subs(subs)
         return rate, energies
 
     def compute_educt_mapping(self, educts):
@@ -416,13 +459,37 @@ class GraphDiff:
         )
         self.has_mapping = True
 
-    def apply(self, ingraph):
+    def apply(self, ingraph, delete_molecules):
         assert self.has_mapping
         outgraph = ingraph.copy()
+        dangling_bonds = []
+        if delete_molecules:
+            for node in self.mapped_removed_nodes:
+                if isinstance(outgraph.nodes[node]['id'], Monomer):
+                    neighborhood = nx.ego_graph(outgraph, node, 2)
+                    mono_prefix = node.split('_')[0]
+                    for n in neighborhood.nodes:
+                        if n in self.mapped_removed_nodes:
+                            continue  # skip removal here
+                        if n.split('_')[0] == mono_prefix:
+                            outgraph.remove_node(n)  # remove nodes from
+                            # same monomer
+                        else:
+                            # dont fix dangling bonds here as we might mess
+                            # this up again when adding/removing nodes in
+                            # the next steps
+                            dangling_bonds.append(n)
         outgraph.remove_nodes_from(self.mapped_removed_nodes)
         outgraph.add_nodes_from(self.mapped_added_nodes)
         outgraph.add_edges_from(self.mapped_added_edges)
         outgraph.remove_edges_from(self.mapped_removed_edges)
+        # fix dangling bonds:
+        if delete_molecules:
+            for node in list(dangling_bonds):
+                mono_prefix = node.split('_')[0]
+                if f'{mono_prefix}_unbound' not in outgraph.nodes():
+                    outgraph.add_node(f'{mono_prefix}_unbound', id=NO_BOND)
+                outgraph.add_edge(node, f'{mono_prefix}_unbound')
         return outgraph
 
 
@@ -471,11 +538,10 @@ def align_monomer_indices(reactantpattern, productpattern):
 
     for imono, rp_mono in enumerate(rp_monos):
         # find first MonomerPattern in productpattern with same monomer name
-        index = next(
-            ((icp, imp) for (icp,imp), pp_mono in pp_monos.items()
-            if pp_mono == rp_mono),
-            None
-        )
+        index = next((
+            (icp, imp) for (icp, imp), pp_mono in pp_monos.items()
+            if pp_mono == rp_mono
+        ), None)
         # if we find a match, set alignment index and delete to prevent
         # rematch, else continue
         if index is not None:
@@ -490,38 +556,46 @@ def align_monomer_indices(reactantpattern, productpattern):
 
 
 def reaction_pattern_from_graph(graph):
-    return ReactionPattern(
-        [complex_pattern_from_graph(graph.subgraph(c)) for c in
-         nx.connected_components(graph)]
+    compartments = {n for n, d in graph.nodes(data=True)
+                    if isinstance(d['id'], Compartment)}
+    components = nx.connected_components(
+        graph.subgraph([n for n in graph.nodes if n not in compartments])
     )
+    return ReactionPattern([
+        complex_pattern_from_graph(graph.subgraph(c | compartments))
+        for c in components
+    ])
 
 
 def complex_pattern_from_graph(graph):
-    assert(nx.is_connected(graph))
     bounds = list()
-    return ComplexPattern(
-        [
-            monomer_pattern_from_node(graph, node[0], bounds)
-            for node in graph.nodes(data=True)
-            if isinstance(node[1]['id'], Monomer)
-        ],
-        None
-    )
+    compartment = None
+    mps = []
+    for n, d in graph.nodes(data=True):
+        if isinstance(d['id'], Compartment):
+            continue
+        if isinstance(d['id'], Monomer):
+            mps.append(monomer_pattern_from_node(graph, n, bounds))
+    return ComplexPattern(mps, compartment
+                          if all(mp.compartment is None for mp in mps)
+                          else None)
 
 
 def monomer_pattern_from_node(graph, monomer_node, bounds):
-    monomer = graph.nodes.data()[monomer_node]['id']
-    site_conditions = {
-        graph.nodes.data()[site]['id']: site_condition_from_node(
-            graph, monomer, site, bounds
-        )
-        for site in graph.neighbors(monomer_node)
-    }
-    return monomer(**site_conditions)
+    monomer = graph.nodes[monomer_node]['id']
+    compartment = None
+    site_conditions = dict()
+    for site in graph.neighbors(monomer_node):
+        if isinstance(graph.nodes[site]['id'], Compartment):
+            compartment = graph.nodes[site]['id']
+        else:
+            site_conditions[graph.nodes[site]['id']] = \
+                site_condition_from_node(graph, monomer, site, bounds)
+    return MonomerPattern(monomer, site_conditions, compartment)
 
 
 def site_condition_from_node(graph, monomer, site_node, bounds):
-    state = None
+    states = []
     site = graph.nodes.data()[site_node]['id']
     for condition_node in graph.neighbors(site_node):
         state_candidate = graph.nodes.data()[condition_node]['id']
@@ -531,11 +605,16 @@ def site_condition_from_node(graph, monomer, site_node, bounds):
             continue
         elif site in monomer.site_states and state_candidate in \
                 monomer.site_states[site]:
-            state = state_candidate
+            states.append(state_candidate)
         else:
             if site_node in bounds:
-                state = bounds.index(site_node)
+                states.append(bounds.index(site_node))
             else:
-                state = len(bounds)
+                states.append(len(bounds))
                 bounds.append(condition_node)
-    return state
+    if len(states) == 0:
+        return None
+    elif len(states) == 1:
+        return states[0]
+    else:
+        return tuple(states)

@@ -6,7 +6,7 @@ import sympy as sp
 import networkx as nx
 
 from pysb import (
-    ReactionPattern, ComplexPattern, MonomerPattern, Monomer, Expression,
+    ReactionPattern, ComplexPattern, Monomer, Expression,
     Observable, Compartment
 )
 from pysb.pattern import match_complex_pattern
@@ -289,9 +289,27 @@ class ReactionGenerator:
             mp_alignment_cp
         )
 
+        compartment_educt = next((
+            educt.compartment
+            for educt in educts
+            if educt.compartment is not None
+        ), None)
+
         products = reaction_pattern_from_graph(
             self.graph_diff.apply(educt_graph, self.delete_molecules),
+            compartment_educt
         ).complex_patterns
+
+        compartment_product = next((
+            product.compartment
+            for product in products
+            if product.compartment is not None
+        ), None)
+
+        volume_factor = 1
+        if compartment_educt is not compartment_product:
+            if compartment_educt is None:
+                volume_factor = 1*compartment_product.size.value
 
         rate, energies = self.get_reaction_rate(
             educts, products, model
@@ -301,8 +319,8 @@ class ReactionGenerator:
             'rule': self.name,
             'product_patterns': products,
             'educt_patterns': educts,
-            'rate': stat_factor * rate * np.prod([sp.Symbol(f'__s{ix}')
-                                                  for ix in educt_indices]),
+            'rate': stat_factor * volume_factor * rate *
+                    np.prod([sp.Symbol(f'__s{ix}') for ix in educt_indices]),
             'energies': energies,
             'educts': tuple(educt_indices),
         }
@@ -555,66 +573,15 @@ def align_monomer_indices(reactantpattern, productpattern):
     return rp_alignment, pp_alignment
 
 
-def reaction_pattern_from_graph(graph):
+def reaction_pattern_from_graph(graph, compartment):
     compartments = {n for n, d in graph.nodes(data=True)
                     if isinstance(d['id'], Compartment)}
     components = nx.connected_components(
         graph.subgraph([n for n in graph.nodes if n not in compartments])
     )
     return ReactionPattern([
-        complex_pattern_from_graph(graph.subgraph(c | compartments))
+        ComplexPattern.from_graph(graph.subgraph(c | compartments),
+                                  compartment).copy()
+        # copy to ensure canonicalization
         for c in components
     ])
-
-
-def complex_pattern_from_graph(graph):
-    bounds = list()
-    compartment = None
-    mps = []
-    for n, d in graph.nodes(data=True):
-        if isinstance(d['id'], Compartment):
-            continue
-        if isinstance(d['id'], Monomer):
-            mps.append(monomer_pattern_from_node(graph, n, bounds))
-    return ComplexPattern(mps, compartment
-                          if all(mp.compartment is None for mp in mps)
-                          else None)
-
-
-def monomer_pattern_from_node(graph, monomer_node, bounds):
-    monomer = graph.nodes[monomer_node]['id']
-    compartment = None
-    site_conditions = dict()
-    for site in graph.neighbors(monomer_node):
-        if isinstance(graph.nodes[site]['id'], Compartment):
-            compartment = graph.nodes[site]['id']
-        else:
-            site_conditions[graph.nodes[site]['id']] = \
-                site_condition_from_node(graph, monomer, site, bounds)
-    return MonomerPattern(monomer, site_conditions, compartment)
-
-
-def site_condition_from_node(graph, monomer, site_node, bounds):
-    states = []
-    site = graph.nodes.data()[site_node]['id']
-    for condition_node in graph.neighbors(site_node):
-        state_candidate = graph.nodes.data()[condition_node]['id']
-        if state_candidate == 'NoBond':
-            continue
-        elif isinstance(state_candidate, Monomer):
-            continue
-        elif site in monomer.site_states and state_candidate in \
-                monomer.site_states[site]:
-            states.append(state_candidate)
-        else:
-            if site_node in bounds:
-                states.append(bounds.index(site_node))
-            else:
-                states.append(len(bounds))
-                bounds.append(condition_node)
-    if len(states) == 0:
-        return None
-    elif len(states) == 1:
-        return states[0]
-    else:
-        return tuple(states)

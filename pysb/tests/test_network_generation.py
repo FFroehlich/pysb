@@ -22,7 +22,7 @@ def bngl_compare_network_generation(bng_file):
         init.pattern for init in m.initials
     ])
 
-    #validate_network(m, network)
+    validate_network(m, network)
 
 
 def test_bng_models():
@@ -36,17 +36,17 @@ def test_bng_models():
                      #'gene_expr_simple',
                      #'isomerization',
                      #'michment',
-                     ##'Motivating_example_cBNGL',
+                     'Motivating_example_cBNGL',
                      #'motor',
                      #'simple_system',
                      #'test_compartment_XML',
                      #'test_setconc',
                      #'test_synthesis_cBNGL_simple',
                      ##'test_synthesis_complex',
-                     ##'test_synthesis_complex_0_cBNGL',
-                     ##'test_synthesis_complex_source_cBNGL',
+                     #'test_synthesis_complex_0_cBNGL',
+                     #'test_synthesis_complex_source_cBNGL',
                      #'test_synthesis_simple',
-                     #'toy-jim',
+                     ##'toy-jim',
                      #'univ_synth',
                      #'visualize',
                      #'statfactor',

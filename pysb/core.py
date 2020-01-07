@@ -10,9 +10,9 @@ import copy
 import itertools
 import numbers
 import sympy
-import numpy as np
 import scipy.sparse
 import networkx as nx
+from collections import OrderedDict
 
 try:
     reload
@@ -434,9 +434,28 @@ class MonomerPattern(object):
             raise ValueError("compartment is not a Compartment object")
 
         self.monomer = monomer
-        self.site_conditions = site_conditions
+        self.site_conditions = OrderedDict(
+            (k, sorted(v))
+            if isinstance(v, list)
+            else (k, v)
+            for k, v in sorted(site_conditions.items(), key=lambda x: x[0])
+        )
         self.compartment = compartment
         self._graph = None
+
+
+    @classmethod
+    def from_graph(cls, graph, monomer_node, bounds):
+            monomer = graph.nodes[monomer_node]['id']
+            compartment = None
+            site_conditions = dict()
+            for site in graph.neighbors(monomer_node):
+                if isinstance(graph.nodes[site]['id'], Compartment):
+                    compartment = graph.nodes[site]['id']
+                else:
+                    site_conditions[graph.nodes[site]['id']] = \
+                        site_condition_from_node(graph, monomer, site, bounds)
+            return cls(monomer, site_conditions, compartment)
 
     def is_concrete(self):
         """
@@ -559,7 +578,7 @@ class MonomerPattern(object):
         value = '%s(' % self.monomer.name
         value += ', '.join([
                 k + '=' + repr(self.site_conditions[k])
-                for k in sorted(self.monomer.sites)
+                for k in self.monomer.sites
                 if k in self.site_conditions
                 ])
         value += ')'
@@ -568,7 +587,47 @@ class MonomerPattern(object):
         return value
 
 
+def site_condition_from_node(graph, monomer, site_node, bonds):
+    states = []
+    site = graph.nodes[site_node]['id']
+    for condition_node in graph.neighbors(site_node):
+        state_candidate = graph.nodes[condition_node]['id']
+        if state_candidate == 'NoBond':
+            continue
+        elif isinstance(state_candidate, Monomer):
+            continue
+        elif site in monomer.site_states and state_candidate in \
+                monomer.site_states[site]:
+            states.append(state_candidate)
+        elif isinstance(state_candidate, AnyBondTester) and \
+                not isinstance(state_candidate, int):
+            states.append(ANY)
+        else:
+            if site_node in bonds:
+                states.append(bonds.index(site_node)+1)
+            else:
+                states.append(len(bonds)+1)
+                bonds.append(condition_node)
+    if len(states) == 0:
+        return None
+    elif len(states) == 1:
+        return states[0]
+    elif len(states) == 2 and any(not isinstance(state, int)
+                                  for state in states):
+        if isinstance(states[1], int):
+            return tuple(states)
+        else:
+            return states[1], states[0]
+    else:
+        return sorted(states)
+
+
 NO_BOND = 'NoBond'
+
+
+class AnyBondTester(object):
+    def __eq__(self, other):
+        return not isinstance(other, Component) and other != NO_BOND
 
 
 class ComplexPattern(object):
@@ -601,24 +660,68 @@ class ComplexPattern(object):
         if compartment and not isinstance(compartment, Compartment):
             raise Exception("compartment is not a Compartment object")
 
-        for mp in monomer_patterns:
-            if mp.compartment is None:
-                mp.compartment = compartment
+        if compartment is not None:
+            for mp in monomer_patterns:
+                if mp.compartment is None:
+                    mp.compartment = compartment
 
-        self.monomer_patterns = monomer_patterns
-        self.compartments = {
+        self.monomer_patterns = sorted(monomer_patterns,
+                                       key=lambda x: x.__repr__())
+        compartments = {
             mp.compartment for mp in self.monomer_patterns
         }
         # if monomer patterns span multiple compartments, cBNGL defines
         # the species compartment as the surface compartment
-        self.compartment = next(comp for comp in self.compartments
-                                if len(self.compartments) == 1
-                                or comp.dimension == 2)
-
-        self.monomer_patterns = monomer_patterns
-        self.compartment = compartment
+        self.compartment = next((
+            comp for comp in compartments
+            if len(compartments) == 1
+            # default to this if there only is one compartment
+            or (comp is not None and comp.dimension == 2)
+            # search for surface compartment
+        ), next((
+            comp for comp in compartments
+            if comp is not None
+            # if no surface compartment pick the one that is not None
+        ), None))
         self.match_once = match_once
         self._graph = None
+        self.canonical_repr = None
+
+    def get_canonical_repr(self):
+        if self.canonical_repr is not None:
+            return self.canonical_repr
+
+        if not self.is_concrete():
+            # canonicalize bond ordering only if pattern is concrete, otherwise
+            # _as_graph() and from_graph will not roundtrip
+            ValueError('Cannot canonicalize patterns that are not concrete.')
+
+        from pysb.pattern import check_dangling_bonds
+        try:
+            check_dangling_bonds(self)
+            has_dangling_bonds = False
+        except DanglingBondError:
+            has_dangling_bonds = True
+        if has_dangling_bonds:
+            ValueError('Cannot canonicalize patterns that have dangling '
+                       'bonds.')
+
+        canonic = ComplexPattern.from_graph(self._as_graph(), self.compartment)
+        self.canonical_repr = ' % '.join(mp.__repr__()
+                                         for mp in canonic.monomer_patterns)
+        return self.canonical_repr
+
+
+    @classmethod
+    def from_graph(cls, graph, compartment):
+        bonds = list()
+        mps = []
+        for n, d in graph.nodes(data=True):
+            if isinstance(d['id'], Monomer):
+                mps.append(MonomerPattern.from_graph(graph, n, bonds))
+        return cls(mps, compartment
+                   if all(mp.compartment is None for mp in mps)
+                   else None)
 
     def is_concrete(self):
         """
@@ -700,10 +803,6 @@ class ComplexPattern(object):
                 yield i
                 i += 1
         node_count = autoinc()
-
-        class AnyBondTester(object):
-            def __eq__(self, other):
-                return not isinstance(other, Component) and other != NO_BOND
 
         any_bond_tester = AnyBondTester()
 
@@ -940,8 +1039,6 @@ class ComplexPattern(object):
 
     def __repr__(self):
         ret = ' % '.join([repr(p) for p in self.monomer_patterns])
-        if self.compartment is not None:
-            ret = '(%s) ** %s' % (ret, self.compartment.name)
         if self.match_once:
             ret = 'MatchOnce(%s)' % ret
         return ret

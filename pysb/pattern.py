@@ -297,9 +297,13 @@ def match_complex_pattern(pattern, candidate, exact=False, count=False):
     True if pattern matches candidate, False otherwise
     """
 
-    if exact and len(pattern.monomer_patterns) != len(
-            candidate.monomer_patterns):
-        return 0 if count else False
+    no_match_return = 0 if count else False
+
+    if exact and pattern.is_concrete():
+        if not candidate.is_concrete():
+            return no_match_return
+        match = pattern.get_canonical_repr() == candidate.get_canonical_repr()
+        return int(match) if count else match
 
     # Compare the monomer counts in the patterns so we can fail fast
     # without having to compare bonds using graph isomorphism checks, which
@@ -312,9 +316,9 @@ def match_complex_pattern(pattern, candidate, exact=False, count=False):
     for mon, mon_count_cand in mons_cand.items():
         mon_count_pat = mons_pat.get(mon, 0)
         if exact and mon_count_cand != mon_count_pat:
-            return 0 if count else False
+            return no_match_return
         if mon_count_pat > mon_count_cand:
-            return 0 if count else False
+            return no_match_return
 
     # If we've got this far, we'll need to do a full pattern match
     # by searching for a graph isomorphism

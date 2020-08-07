@@ -263,7 +263,7 @@ def _match_graphs(pattern, candidate, exact, count):
         match = nx.is_isomorphic(pattern._as_graph(),
                                  candidate._as_graph(),
                                  node_match=node_matcher)
-        return 1 if count else match
+        return int(match) if count else match
     else:
         gm = GraphMatcher(
             candidate._as_graph(), pattern._as_graph(),
@@ -297,13 +297,17 @@ def match_complex_pattern(pattern, candidate, exact=False, count=False):
     True if pattern matches candidate, False otherwise
     """
 
-    no_match_return = 0 if count else False
-
-    if exact and pattern.is_concrete():
+    if exact:
+        if not pattern.is_concrete():
+            raise ValueError('Pattern must be concrete for '
+                             'exact matching: {}'.format(pattern))
         if not candidate.is_concrete():
-            return no_match_return
-        match = pattern.get_canonical_repr() == candidate.get_canonical_repr()
-        return int(match) if count else match
+            raise ValueError('Candidate must be concrete for '
+                             'exact matching: {}'.format(candidate))
+
+    if exact and len(pattern.monomer_patterns) != len(
+            candidate.monomer_patterns):
+        return False
 
     # Compare the monomer counts in the patterns so we can fail fast
     # without having to compare bonds using graph isomorphism checks, which
@@ -316,9 +320,9 @@ def match_complex_pattern(pattern, candidate, exact=False, count=False):
     for mon, mon_count_cand in mons_cand.items():
         mon_count_pat = mons_pat.get(mon, 0)
         if exact and mon_count_cand != mon_count_pat:
-            return no_match_return
+            return False
         if mon_count_pat > mon_count_cand:
-            return no_match_return
+            return False
 
     # If we've got this far, we'll need to do a full pattern match
     # by searching for a graph isomorphism

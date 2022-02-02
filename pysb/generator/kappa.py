@@ -6,24 +6,24 @@ from sympy.core import S
 import collections
 import re
 import pysb.logging
-from pysb.export import CompartmentsNotSupported
-# Alias basestring under Python 3 for forwards compatibility
-try:
-    basestring
-except NameError:
-    basestring = str
+from pysb.export import CompartmentsNotSupported, LocalFunctionsNotSupported
 
 
 class KappaGenerator(object):
 
     # Dialect can be either 'complx' or 'kasim' (default)
-    def __init__(self, model, dialect='kasim', _warn_no_ic=True):
-        if model and model.compartments:
-            raise CompartmentsNotSupported()
+    def __init__(self, model, dialect='kasim', _warn_no_ic=True,
+                 _exclude_ic_param=False):
+        if model:
+            if model.compartments:
+                raise CompartmentsNotSupported()
+            if model.tags:
+                raise LocalFunctionsNotSupported()
         self.model = model
         self.__content = None
         self.dialect = dialect
         self._warn_no_ic = _warn_no_ic
+        self._exclude_ic_param = _exclude_ic_param
         self._renamed_states = collections.defaultdict(dict)
         self._log = pysb.logging.get_logger(__name__)
 
@@ -41,15 +41,17 @@ class KappaGenerator(object):
         if (self.dialect == 'kasim'):
             self.generate_molecule_types() 
             # Parameters, variables, and expressions are allowed in kasim
-            self.generate_parameters()
+            if not self._exclude_ic_param:
+                self.generate_parameters()
 
         self.generate_reaction_rules()
         self.generate_observables()
-        self.generate_species()
+        if not self._exclude_ic_param:
+            self.generate_species()
 
     def generate_parameters(self):
         for p in self.model.parameters:
-            self.__content += "%%var: '%s' %e\n" % (p.name, p.value)
+            self.__content += "%%var: '%s' %.17g\n" % (p.name, p.value)
         for e in self.model.expressions:
             str_expr = str(expression_to_muparser(e))
             self.__content += "%%var: '%s' %s\n" % (e.name, str_expr)
@@ -196,12 +198,14 @@ class KappaGenerator(object):
         # If there is a bond number
         elif isinstance(state, int):
             state_code = '[%s]' % state
-        # If there is a lists of bonds to the site (not supported by Kappa)
+        # Multi-bond (list of bonds)
         elif isinstance(state, list):
-            raise KappaException("Kappa generator does not support multiple "
-                                 "bonds to a single site.")
+            raise KappaException("Kappa generator does not support multi-bonds")
+        # If there is a MultiState, raise an Exception (not supported by Kappa)
+        elif isinstance(state, pysb.MultiState):
+            raise KappaException("Kappa generator does not support MultiStates")
         # Site with state
-        elif isinstance(state, basestring):
+        elif isinstance(state, str):
             state_code = '{%s}[.]' % state
         # Site with state and a bond
         elif isinstance(state, tuple):

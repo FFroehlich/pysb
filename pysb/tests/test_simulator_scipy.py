@@ -3,8 +3,9 @@ import sys
 import copy
 import numpy as np
 from pysb import Monomer, Parameter, Initial, Observable, Rule, Expression
-from pysb.simulator import ScipyOdeSimulator
-from pysb.examples import robertson, earm_1_0
+from pysb.simulator import ScipyOdeSimulator, InconsistentParameterError
+from pysb.simulator.scipyode import CythonRhsBuilder
+from pysb.examples import robertson, earm_1_0, tyson_oscillator, localfunc
 import unittest
 import pandas as pd
 
@@ -194,20 +195,6 @@ class TestScipyOdeCompilerTests(TestScipySimulatorBase):
         assert simres.species.shape[0] == self.args['tspan'].shape[0]
         assert np.allclose(self.python_res.dataframe, simres.dataframe)
 
-    def test_theano(self):
-        sim = ScipyOdeSimulator(compiler='theano', **self.args)
-        simres = sim.run()
-        assert simres.species.shape[0] == self.args['tspan'].shape[0]
-        assert np.allclose(self.python_res.dataframe, simres.dataframe)
-
-    @unittest.skipIf(sys.version_info.major >= 3, 'weave not available for '
-                                                  'Python 3')
-    def test_weave(self):
-        sim = ScipyOdeSimulator(compiler='weave', **self.args)
-        simres = sim.run()
-        assert simres.species.shape[0] == self.args['tspan'].shape[0]
-        assert np.allclose(self.python_res.dataframe, simres.dataframe)
-
 
 class TestScipySimulatorSequential(TestScipySimulatorBase):
     def test_sequential_initials(self):
@@ -328,6 +315,18 @@ class TestScipySimulatorMultiple(TestScipySimulatorBase):
         self.sim.param_values = param_values
         self.sim.run(param_values=param_values[0])
 
+    @raises(InconsistentParameterError)
+    def test_run_params_inconsistent_parameter_list(self):
+        param_values = [55, 65, 75, 0, -3]
+        self.sim.param_values = param_values
+        self.sim.run(param_values=param_values[0])
+
+    @raises(InconsistentParameterError)
+    def test_run_params_inconsistent_parameter_dict(self):
+        param_values = {'A_init': [0, -4]}
+        self.sim.param_values = param_values
+        self.sim.run(param_values=param_values[0])
+
     def test_param_values_dict(self):
         param_values = {'A_init': [0, 100]}
         initials = {self.model.monomers['B'](b=None): [250, 350]}
@@ -355,6 +354,25 @@ class TestScipySimulatorMultiple(TestScipySimulatorBase):
                         [90, 100, 110, 5, 6],
                         [90, 100, 110, 5, 6]]
         self.sim.run(initials=initials, param_values=param_values)
+
+    @unittest.skipIf(sys.version_info.major < 3,
+                     'Parallel execution requires Python >= 3.3')
+    def test_parallel(self):
+        for integrator in ('vode', 'lsoda'):
+            for use_analytic_jacobian in (True, False):
+                yield self._check_parallel, integrator, use_analytic_jacobian
+
+    def _check_parallel(self, integrator, use_analytic_jacobian):
+        initials = [[10, 20, 30], [50, 60, 70]]
+        sim = ScipyOdeSimulator(
+            self.model, self.sim.tspan,
+            initials=initials,
+            integrator=integrator,
+            use_analytic_jacobian=use_analytic_jacobian
+        )
+        base_res = sim.run(initials=initials)
+        res = sim.run(initials=initials, num_processors=2)
+        assert np.allclose(res.species, base_res.species)
 
 
 @with_model
@@ -400,13 +418,12 @@ def test_set_initial_to_zero():
 def test_robertson_integration():
     """Ensure robertson model simulates."""
     t = np.linspace(0, 100)
-    # Run with or without inline
-    sim = ScipyOdeSimulator(robertson.model)
-    simres = sim.run(tspan=t)
+    sim = ScipyOdeSimulator(robertson.model, tspan=t, compiler="python")
+    simres = sim.run()
     assert simres.species.shape[0] == t.shape[0]
-    if sim._compiler != 'python':
-        # Also run without inline
-        sim = ScipyOdeSimulator(robertson.model, tspan=t, compiler='python')
+    # Also run with cython compiler if available.
+    if CythonRhsBuilder.check_safe():
+        sim = ScipyOdeSimulator(robertson.model, tspan=t, compiler="cython")
         simres = sim.run()
         assert simres.species.shape[0] == t.shape[0]
 
@@ -414,12 +431,11 @@ def test_robertson_integration():
 def test_earm_integration():
     """Ensure earm_1_0 model simulates."""
     t = np.linspace(0, 1e3)
-    # Run with or without inline
-    sim = ScipyOdeSimulator(earm_1_0.model, tspan=t)
+    sim = ScipyOdeSimulator(earm_1_0.model, tspan=t, compiler="python")
     sim.run()
-    if sim._compiler != 'python':
-        # Also run without inline
-        ScipyOdeSimulator(earm_1_0.model, tspan=t, compiler='python').run()
+    # Also run with cython compiler if available.
+    if CythonRhsBuilder.check_safe():
+        ScipyOdeSimulator(earm_1_0.model, tspan=t, compiler="cython").run()
 
 
 @raises(ValueError)
@@ -481,3 +497,17 @@ if sys.version_info[0] < 3:
         sim = ScipyOdeSimulator(rob_copy)
         simres = sim.run(tspan=t)
 
+
+def test_multiprocessing_lambdify():
+    model = tyson_oscillator.model
+    pars = [p.value for p in model.parameters]
+    tspan = np.linspace(0, 100, 100)
+    ScipyOdeSimulator(
+        model, tspan=tspan, compiler='python',
+        use_analytic_jacobian=True
+    ).run(param_values=[pars, pars], num_processors=2)
+
+
+def test_lambdify_localfunc():
+    model = localfunc.model
+    ScipyOdeSimulator(model, tspan=range(100), compiler='python').run()

@@ -1,7 +1,10 @@
+import copy
+
 from pysb.testing import *
 from pysb.core import *
 from functools import partial
 from nose.tools import assert_raises
+import operator
 
 
 @with_model
@@ -15,6 +18,11 @@ def test_component_names_valid():
         model.add_component(c)
         assert_equal(model.components[name], c)
         assert_equal(getattr(model.components, name), c)
+
+@with_model
+def test_deepcopy_parameter():
+    Parameter("a", 1)
+    copy.deepcopy(model)
 
 
 @with_model
@@ -31,6 +39,32 @@ def test_component_name_existing_attribute():
 def test_component_names_invalid():
     for name in 'a!', '!B', 'A!bC~`\\', '_!', '_!7', '__a01b  999x_x___!':
         assert_raises(InvalidComponentNameError, Component, name, _export=False)
+
+@with_model
+def test_function_introspection():
+    # Case 1: Component defined inside function
+    Monomer('A')
+    assert A._function == 'test_function_introspection'
+
+    # Case 2: Component defined inside nested function
+    def define_monomer_b():
+        Monomer('B')
+    define_monomer_b()
+    assert B._function == 'define_monomer_b'
+
+    # Case 3: Component defined by macro
+    from pysb.macros import equilibrate
+    equilibrate(A(), B(), [1, 1])
+
+    assert model.rules['equilibrate_A_to_B']._function == 'equilibrate'
+
+    # Case 4: Component defined by macro inside function
+    def define_macro_inside_function():
+        Monomer('C')
+        equilibrate(A(), C(), [2, 2])
+    define_macro_inside_function()
+    assert model.rules['equilibrate_A_to_C']._function == 'equilibrate'
+
 
 def test_monomer():
     sites = ['x', 'y', 'z']
@@ -163,6 +197,17 @@ def test_compartment_initial_error():
     c2 = Compartment("C2")
     Initial(A(s=None)**c1, A_0)
     Initial(A(s=None)**c2, A_0)
+
+@with_model
+def test_compartment():
+    # Ensure that compartment size can be specified by a parameter,
+    #  a constant expression, or be omitted.
+    Parameter('A', 1.0)
+    Parameter('B', 2.0)
+    Expression('E', A * B)
+    Compartment("C1")
+    Compartment("C2", C1, 2, A)
+    Compartment("C3", C1, 2, E)
 
 @with_model
 def test_monomer_pattern_add_to_none():
@@ -360,6 +405,15 @@ def test_expression_type():
 
 
 @with_model
+def test_expression_evaluation():
+    Parameter('k1', 10)
+    Expression('k2', 2 * k1)
+    Expression('k3', k2/2)
+    assert int(k2.get_value()) == 20
+    assert int(k3.get_value()) == 10
+
+
+@with_model
 def test_synth_requires_concrete():
     Monomer('A', ['s'], {'s': ['a', 'b']})
     Parameter('kA', 1.0)
@@ -378,3 +432,215 @@ def test_rulepattern_match_none_against_state():
     # so this should be a valid rule pattern
     A(phospho=None) + A(phospho=None) >> A(phospho=1) % A(phospho=1)
 
+
+@with_model
+def test_tags():
+    Monomer('A', ['b'])
+    Tag('x')
+
+    # Use __matmul__ instead of @ for Python 2.7 support in tests
+    assert repr(x) == "Tag('x')"
+    assert repr(x.__matmul__(A()) % A()) == 'x @ A() % A()'
+    assert repr((A() % A()).__matmul__(x)) == 'A() % A() @ x'
+
+    # Postfix tags should auto-upgrade a MonomerPattern to a ComplexPattern
+    assert isinstance(A().__matmul__(x), ComplexPattern)
+
+    # Trying to extend a tagged complex should fail - the tag should always
+    # be specified last
+    assert_raises(ValueError, operator.mod, (A(b=1) % A(b=1)).__matmul__(x),
+                  A(b=1))
+
+    Observable('o1', A(b=None))
+
+    # Create an expression containing a tag
+    Expression('e_no_tag', o1 ** 2)
+    Expression('e_tag', o1(x) ** 2)
+
+    # Test tag defined in rate but not in rule expression
+    assert_raises(ValueError, Rule, 'r1', None >> A(b=None), e_tag)
+
+    # Test tag defined in rule expression but not in rate
+    Rule('r2', None >> A(b=None).__matmul__(x), e_no_tag)
+
+    # Test tag with compartment
+    Compartment('c')
+    assert repr((A().__matmul__(x)) ** c) == 'A() ** c @ x'
+    assert repr((A() ** c).__matmul__(x)) == 'A() ** c @ x'
+
+
+@with_model
+def test_multi_bonds():
+    Monomer('A', ['a'])
+    a_pat = A(a=[1, 2])
+
+    # Check _as_graph() works for multi-bonds
+    a_pat._as_graph()
+
+    assert a_pat.is_concrete()
+
+
+@with_model
+def test_duplicate_sites():
+    Monomer('A', ['a', 'a'])
+    Monomer('B', ['b', 'b'], {'b': ['u', 'p']})
+
+    assert not A(a=1).is_concrete()
+    assert A(a=MultiState(1, 2)).is_concrete()
+    assert A(a=MultiState(1, None)).is_concrete()
+
+    assert not B(b=('u', 1)).is_concrete()
+
+    assert B(b=MultiState('u', 'p')).is_concrete()
+    assert B(b=MultiState(('u', 1), ('u', 2))).is_concrete()
+
+    # Check _as_graph() works for duplicate sites
+    B(b=MultiState(('u', 1), ('u', 2)))._as_graph()
+
+    assert B(b=MultiState('u', ('u', 1))).is_concrete()
+
+    # Syntax errors (should use MultiState)
+    assert_raises(ValueError, B, b=('u', 'p'))
+    assert_raises(ValueError, B, b=['u', 'p'])
+
+    # Syntax error (can't nest MultiState)
+    assert_raises(ValueError, MultiState, MultiState(1, 2), 'p')
+
+    # Duplicate sites with multi-bond
+    A(a=MultiState([1, 2], [1, 2]))
+
+
+@raises(ValueError)
+def test_duplicate_site_single_site():
+    MultiState('a')
+
+
+@with_model
+def test_invalid_rule():
+    Monomer('A')
+    assert_raises(ExpressionError, Rule, 'r1', None >> A(), 1.0)
+    assert len(model.rules) == 0
+
+    Parameter('kf', 1.0)
+    assert_raises(Exception, Rule, 'r1', 'invalid_rule_expr', kf)
+    assert len(model.rules) == 0
+
+
+@with_model
+def test_invalid_expression():
+    assert_raises(ValueError, Expression, 'e1', 'invalid_expr')
+    assert len(model.expressions) == 0
+
+
+@with_model
+def test_invalid_monomer_name():
+    assert_raises(ValueError, Monomer, 'a', 123)
+    assert len(model.monomers) == 0
+
+
+@with_model
+def test_invalid_parameter():
+    assert_raises(ValueError, Parameter, 'a', 'invalid_value')
+    assert len(model.parameters) == 0
+
+
+@with_model
+def test_invalid_compartment():
+    assert_raises(Exception, Compartment, 'c1', 'invalid_parent')
+
+    # Invalid dynamic expression as compartment size
+    Monomer('A')
+    Observable('O', A)
+    Expression('E', O)
+    assert_raises(Exception, Compartment, 'c2', size=E)
+
+    assert len(model.compartments) == 0
+
+
+@with_model
+def test_invalid_observable():
+    assert_raises(InvalidReactionPatternException,
+                  Observable, 'o1', 'invalid_pattern')
+    assert len(model.observables) == 0
+
+
+@with_model
+def test_update_initial_condition():
+    Monomer('A')
+    Monomer('B')
+    Parameter('k', 1.0)
+    Initial(A(), k)
+
+    model.update_initial_condition_pattern(A(), B())
+
+    assert len(model.initials) == 1
+    assert as_complex_pattern(B()).is_equivalent_to(
+        as_complex_pattern(model.initials[0].pattern))
+
+
+def test_model_not_defined():
+    assert_raises(ModelNotDefinedError, Monomer, 'A')
+
+
+@raises(ReusedBondError)
+@with_model
+def test_bind_multiple():
+    Monomer('A', ['a'])
+    Monomer('B', ['b'])
+
+    as_reaction_pattern(A(a=1) % B(b=1) % B(b=1))
+
+
+@raises(ValueError)
+@with_model
+def test_reverse_rate_non_reversible_rule():
+    Monomer('A')
+    Parameter('kf', 1)
+    Parameter('kr', 2)
+    Rule('r1', None >> A(), kf, kr)
+
+
+@with_model
+def test_parameter_assumptions():
+    Parameter('k1', 0.0)
+    assert k1.is_real
+    assert k1.is_nonnegative
+    assert not k1.is_integer
+    Parameter('k2', 0.0, nonnegative=False)
+    assert not k2.is_nonnegative
+    Parameter('k3', 0.0, integer=True)
+    assert k3.is_integer
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_noninteger_integer_init():
+    Parameter('k3', 0.3, integer=True)
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_noninteger_integer_setter():
+    Parameter('k3', 1.0, integer=True)
+    k3.value = 0.4
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_negative_nonnegative_init():
+    Parameter('k3', -0.2, nonnegative=True)
+
+
+@raises(ValueError)
+@with_model
+def test_parameter_negative_nonnegative_setter():
+    Parameter('k3', 0.0, nonnegative=True)
+    k3.value = -0.2
+
+
+@with_model
+def test_reversible_synthesis():
+    Monomer('A')
+    Parameter('k', 1)
+    Rule('r1', None | A(), k, k)
+    Rule('r2', None | as_complex_pattern(A()), k, k)

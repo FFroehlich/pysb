@@ -1,17 +1,13 @@
 import inspect
 import warnings
 import pysb
+from pysb.core import MultiState
 import sympy
 from sympy.printing import StrPrinter
+from sympy.printing.precedence import precedence
 
-# Alias basestring under Python 3 for forwards compatibility
-try:
-    basestring
-except NameError:
-    basestring = str
 
 class BngGenerator(object):
-
     def __init__(self, model, additional_initials=None, population_maps=None):
         self.model = model
         if additional_initials is None:
@@ -46,7 +42,7 @@ class BngGenerator(object):
         max_length = max(len(p.name) for p in
                          self.model.parameters | self.model.expressions)
         for p in self.model.parameters:
-            self.__content += (("  %-" + str(max_length) + "s   %e\n") %
+            self.__content += (("  %-" + str(max_length) + "s   %.17g\n") %
                                (p.name, p.value))
         for e in exprs:
             self.__content += (("  %-" + str(max_length) + "s   %s\n") %
@@ -104,12 +100,17 @@ class BngGenerator(object):
                                             r.rate_reverse.name)
             self.__content += ("  %-" + str(max_length) + "s  %s %s %s    %s") % \
                 (label, reactants_code, arrow, products_code, kf)
+            if not r.energy:
+                self.__content += _tags_in_rate(r.rate_forward)
             if r.is_reversible and not r.energy:
                 self.__content += ', %s' % r.rate_reverse.name
+                self.__content += _tags_in_rate(r.rate_reverse)
             if r.delete_molecules:
                 self.__content += ' DeleteMolecules'
             if r.move_connected:
                 self.__content += ' MoveConnected'
+            if r.total_rate:
+                self.__content += ' TotalRate'
             self.__content += "\n"
         self.__content += "end reaction rules\n\n"
 
@@ -149,7 +150,7 @@ class BngGenerator(object):
         max_length = max(len(e.name) for e in exprs) + 2
         self.__content += "begin functions\n"
         for i, e in enumerate(exprs):
-            signature = e.name + '()'
+            signature = '{}({})'.format(e.name, ','.join(sorted([sym.name for sym in e.expr.atoms(pysb.Tag)])))
             self.__content += ("  %-" + str(max_length) + "s   %s\n") % \
                 (signature, expression_to_muparser(e))
         self.__content += "end functions\n\n"
@@ -196,6 +197,15 @@ class BngGenerator(object):
         self.__content += 'end population maps\n\n'
 
 
+def _tags_in_rate(expr):
+    if not isinstance(expr, pysb.Expression):
+        return ''
+
+    tags = expr.tags()
+
+    return '({})'.format(', '.join([t.name for t in tags]))
+
+
 def format_monomer_site(monomer, site):
     ret = site
     if site in monomer.site_states:
@@ -220,6 +230,8 @@ def format_complexpattern(cp, fixed=False):
         ret = '$' + ret
     if cp.compartment is not None:
         ret = '@%s:%s' % (cp.compartment.name, ret)
+    if cp._tag:
+        ret = '%{}:{}'.format(cp._tag.name, ret)
     if cp.match_once:
         ret = '{MatchOnce}' + ret
     return ret
@@ -232,6 +244,8 @@ def format_monomerpattern(mp):
     ret = '%s(%s)' % (mp.monomer.name, site_pattern_code)
     if mp.compartment is not None:
         ret = '%s@%s' % (ret, mp.compartment.name)
+    if mp._tag:
+        ret = '{}%{}'.format(ret, mp._tag.name)
     return ret
 
 def format_site_condition(site, state):
@@ -245,7 +259,7 @@ def format_site_condition(site, state):
     elif isinstance(state, list) and all(isinstance(s, int) for s in state):
         state_code = ''.join('!%d' % s for s in state)
     # state
-    elif isinstance(state, basestring):
+    elif isinstance(state, str):
         state_code = '~' + state
     # state AND single bond
     elif isinstance(state, tuple):
@@ -255,6 +269,8 @@ def format_site_condition(site, state):
         elif state[1] == pysb.ANY:
             state = (state[0], '+')
         state_code = '~%s!%s' % state
+    elif isinstance(state, MultiState):
+        return ','.join(format_site_condition(site, s) for s in state)
     # one or more unspecified bonds
     elif state is pysb.ANY:
         state_code = '!+'
@@ -264,7 +280,8 @@ def format_site_condition(site, state):
     elif state is pysb.WILD:
         state_code = '!?'
     else:
-        raise Exception("BNG generator has encountered an unknown element in a rule pattern site condition.")
+        raise ValueError("BNG generator has encountered an unknown element in "
+                         "a rule pattern site condition.")
     return '%s%s' % (site, state_code)
 
 def warn_caller(message):
@@ -291,11 +308,16 @@ class BngPrinter(StrPrinter):
 
         if_stmt = expr.args[-1][0]
         for pos in range(len(expr.args) - 2, -1, -1):
-            if_stmt = 'if({},{},{})'.format(expr.args[pos][1],
-                                            expr.args[pos][0],
-                                            if_stmt)
+            if_stmt = 'if({},{},{})'.format(
+                self._print(expr.args[pos][1]),
+                self._print(expr.args[pos][0]),
+                self._print(if_stmt)
+            )
 
         return if_stmt
+
+    def _print_Dummy(self, expr):
+        return expr.name
 
     def _print_Pow(self, expr, rational=False):
         return super(BngPrinter, self)._print_Pow(expr, rational)\
@@ -306,6 +328,18 @@ class BngPrinter(StrPrinter):
 
     def _print_Or(self, expr):
         return super(BngPrinter, self)._print_Or(expr).replace('|', '||')
+
+    def _print_Relational(self, expr):
+        if getattr(expr, "rel_op", None) not in {"==", "!=", "<", "<=", ">", ">="}:
+            raise NotImplementedError(
+                "Relational operator not supported: %s" % type(expr).__name__
+            )
+        # Adapted from StrPrinter._print_Relational.
+        return '%s %s %s' % (
+            self.parenthesize(expr.lhs, precedence(expr)),
+            expr.rel_op,
+            self.parenthesize(expr.rhs, precedence(expr)),
+        )
 
     def _print_log(self, expr):
         # BNG doesn't accept "log", only "ln".

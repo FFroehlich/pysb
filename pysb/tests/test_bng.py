@@ -1,5 +1,6 @@
 from pysb.testing import *
 from pysb import *
+from pysb.core import as_complex_pattern
 from pysb.bng import *
 import os
 import unittest
@@ -156,6 +157,55 @@ def test_nfsim():
 
 
 @with_model
+def test_nfsim_total_rate():
+    Monomer('A', ['a'])
+    Monomer('B', ['b'])
+
+    Parameter('ksynthA', 100)
+    Parameter('ksynthB', 100)
+    Parameter('kbindAB', 10)
+
+    Parameter('A_init', 20)
+    Parameter('B_init', 30)
+
+    Initial(A(a=None), A_init)
+    Initial(B(b=None), B_init)
+
+    Observable("A_free", A(a=None))
+    Observable("B_free", B(b=None))
+    Observable("AB_complex", A(a=1) % B(b=1))
+
+    Rule('A_synth', None >> A(a=None), ksynthA)
+    Rule('B_synth', None >> B(b=None), ksynthB)
+    Rule('AB_bind', A(a=None) + B(b=None) >> A(a=1) % B(b=1), kbindAB)
+
+    with BngFileInterface(model) as bng:
+        bng.action('simulate', method='nf', t_end=1000, n_steps=100)
+        bng.execute()
+        res = bng.read_simulation_results()
+        assert res.dtype.names == ('time', 'A_free', 'B_free', 'AB_complex')
+        no_total_rate_ab_complex = res['AB_complex'][-1]
+
+    # Set total rate of last AB_bind reaction to be constant and independent
+    # of A and B concentration. In this case, the number of AB complex molecules
+    # should be less than the non total rate case.
+    model.rules[-1].total_rate = True
+
+    # check that generate network does not fail when total rate is set to be true
+    # generate_network just ignores this setting
+    ok_(generate_network(model))
+
+    with BngFileInterface(model) as bng:
+        bng.action('simulate', method='nf', t_end=1000, n_steps=100)
+        bng.execute()
+        res = bng.read_simulation_results()
+        assert res.dtype.names == ('time', 'A_free', 'B_free', 'AB_complex')
+        total_rate_ab_complex = res['AB_complex'][-1]
+
+    assert no_total_rate_ab_complex > total_rate_ab_complex
+
+
+@with_model
 def test_unicode_strs():
     Monomer(u'A', [u'b'], {u'b':[u'y', u'n']})
     Monomer(u'B')
@@ -218,6 +268,42 @@ def test_fixed_species():
     assert num_non_zeros == 0
 
 
+@with_model
+def test_multistate():
+    Monomer('A', ['a', 'a'], {'a': ['u', 'p']})
+    Parameter('k1', 100)
+    Parameter('A_0', 200)
+    Rule('r1', None >> A(a=MultiState('u', 'p')), k1)
+    Initial(A(a=MultiState(('u', 1), 'p')) %
+            A(a=MultiState(('u', 1), 'u')), A_0)
+
+    generate_equations(model)
+
+    assert model.species[0].is_equivalent_to(
+        A(a=MultiState(('u', 1), 'p')) % A(a=MultiState(('u', 1), 'u')))
+    assert model.species[1].is_equivalent_to(
+        as_complex_pattern(A(a=MultiState('u', 'p'))))
+
+
+@with_model
+def test_multibonds():
+    Monomer('A', ['a'])
+    Monomer('B', ['b'])
+    Parameter('k1', 100)
+    Parameter('A_0', 200)
+    Parameter('B_0', 50)
+    Rule('r1', A(a=None) + A(a=None) + B(b=None) >>
+            A(a=1) % A(a=[1, 2]) % B(b=2), k1)
+    Initial(A(a=None), A_0)
+    Initial(B(b=None), B_0)
+
+    generate_equations(model)
+
+    assert model.species[2].is_equivalent_to(
+        A(a=1) % A(a=[1, 2]) % B(b=2)
+    )
+
+
 def _bng_print(expr):
     return BngPrinter(order='none').doprint(expr)
 
@@ -274,3 +360,41 @@ def test_bng_printer():
     # Min/max
     assert _bng_print(sympy.Min(x, y)) == 'min(x, y)'
     assert _bng_print(sympy.Max(x, y)) == 'max(x, y)'
+
+    # Relational
+    assert _bng_print(sympy.Eq(x, y)) == 'x == y'
+    assert _bng_print(sympy.Ne(x, y)) == 'x != y'
+    assert _bng_print(x < y) == 'x < y'
+    assert _bng_print(x <= y) == 'x <= y'
+    assert _bng_print(x > y) == 'x > y'
+    assert _bng_print(x >= y) == 'x >= y'
+
+
+def test_bng_printer_relational_unknown():
+    class NewRelational(sympy.core.relational.Relational):
+        rel_op = "??????????"  # A highly unlikely rel_op for a new subclass.
+    x = sympy.Symbol("x")
+    assert_raises(NotImplementedError, _bng_print, NewRelational(x, x))
+
+
+def test_parse_bngl_expression_if():
+    x, y = sympy.symbols('x y')
+    assert parse_bngl_expr('if(x>y, 1, 3)') == \
+        sympy.Piecewise((1, x > y), (3, True))
+
+
+def test_parse_bngl_expression_exponentiate():
+    x, y = sympy.symbols('x y')
+    assert parse_bngl_expr('x ^ y') == sympy.Pow(x, y)
+
+
+def test_parse_bngl_expression_and_or_equals():
+    x, y = sympy.symbols('x y')
+    assert parse_bngl_expr('x and y') == sympy.And(x, y)
+    assert parse_bngl_expr('x or y') == sympy.Or(x, y)
+    assert parse_bngl_expr('x == y') == sympy.Eq(x, y)
+
+
+def test_bng_boolean_multiply_number():
+    assert parse_bngl_expr('(2 > 1) * 4') == 4
+    assert parse_bngl_expr('4 * (2 > 1)') == 4

@@ -11,7 +11,6 @@ specified in one of three ways:
   runtime
 """
 
-from __future__ import print_function as _
 import pysb.pathfinder as pf
 from pysb.generator.kappa import KappaGenerator
 import os
@@ -24,11 +23,6 @@ import warnings
 from collections import namedtuple
 from pysb.util import read_dot
 import pysb.logging
-
-try:
-    from future_builtins import zip
-except ImportError:
-    pass
 
 logger = pysb.logging.get_logger(__name__)
 
@@ -69,6 +63,10 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
                    output_prefix=None, output_dir=None, flux_map=False,
                    perturbation=None, seed=None, verbose=False):
     """Runs the given model using KaSim and returns the parsed results.
+
+    .. deprecated:: 1.10
+
+    Use :func:`pysb.simulator.KappaSimulator` instead
 
     Parameters
     ----------
@@ -129,6 +127,11 @@ def run_simulation(model, time=10000, points=200, cleanup=True,
     a networkx MultiGraph containing the flux map. For details on viewing
     the flux map graphically see :func:`run_static_analysis` (notes section).
     """
+    warnings.warn(
+        'run_simulation will be removed in a future version of PySB. '
+        'Use pysb.simulator.KappaSimulator instead.',
+        DeprecationWarning
+    )
 
     gen = KappaGenerator(model)
 

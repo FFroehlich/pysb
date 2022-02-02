@@ -11,6 +11,7 @@ from pysb.export import Exporter
 from sympy.printing.mathml import MathMLPrinter
 from sympy import Symbol
 from xml.dom.minidom import Document
+import itertools
 try:
     import libsbml
 except ImportError:
@@ -141,7 +142,7 @@ class SbmlExporter(Exporter):
                 _check(c)
                 _check(c.setId(cpt.name))
                 _check(c.setSpatialDimensions(cpt.dimension))
-                _check(c.setSize(cpt.size.value))
+                _check(c.setSize(1 if cpt.size is None else cpt.size.value))
                 _check(c.setConstant(True))
         else:
             c = smodel.createCompartment()
@@ -152,7 +153,11 @@ class SbmlExporter(Exporter):
             _check(c.setConstant(True))
 
         # Expressions
-        for i, expr in enumerate(self.model.expressions):
+        for expr in itertools.chain(
+                self.model.expressions_constant(),
+                self.model.expressions_dynamic(include_local=False),
+                self.model._derived_expressions
+        ):
             # create an observable "parameter"
             e = smodel.createParameter()
             _check(e)
@@ -171,6 +176,7 @@ class SbmlExporter(Exporter):
 
         # Initial values/assignments
         fixed_species_idx = set()
+        initial_species_idx = set()
         for ic in self.model.initials:
             sp_idx = self.model.get_species_index(ic.pattern)
             ia = smodel.createInitialAssignment()
@@ -178,6 +184,7 @@ class SbmlExporter(Exporter):
             _check(ia.setSymbol('__s{}'.format(sp_idx)))
             init_mathml = self._sympy_to_sbmlast(Symbol(ic.value.name))
             _check(ia.setMath(init_mathml))
+            initial_species_idx.add(sp_idx)
 
             if ic.fixed:
                 fixed_species_idx.add(sp_idx)
@@ -208,10 +215,14 @@ class SbmlExporter(Exporter):
             _check(sp.setBoundaryCondition(i in fixed_species_idx))
             _check(sp.setConstant(False))
             _check(sp.setHasOnlySubstanceUnits(True))
+            if i not in initial_species_idx:
+                _check(sp.setInitialAmount(0.0))
+
 
         # Parameters
 
-        for i, param in enumerate(self.model.parameters):
+        for param in itertools.chain(self.model.parameters,
+                                     self.model._derived_parameters):
             p = smodel.createParameter()
             _check(p)
             _check(p.setId(param.name))

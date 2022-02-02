@@ -6,8 +6,8 @@ from pysb.logging import EXTENDED_DEBUG
 from pysb.core import as_complex_pattern, Parameter, \
     InvalidComplexPatternException
 import collections
+from collections.abc import Iterable
 import os
-
 
 class BngSimulator(Simulator):
     """ Simulate a model using BioNetGen """
@@ -17,8 +17,11 @@ class BngSimulator(Simulator):
     }
     _SIMULATOR_TYPES = ['ssa', 'nf', 'pla', 'ode']
 
-    def __init__(self, model, tspan=None, cleanup=True, verbose=False):
+    def __init__(self, model, tspan=None, initials=None, param_values=None,
+                 cleanup=True, verbose=False):
         super(BngSimulator, self).__init__(model, tspan=tspan,
+                                           initials=initials,
+                                           param_values=param_values,
                                            verbose=verbose)
         self.cleanup = cleanup
         self._outdir = None
@@ -108,7 +111,7 @@ class BngSimulator(Simulator):
 
         if method == 'nf':
             if population_maps is not None and (not isinstance(
-                    population_maps, collections.Iterable) or
+                    population_maps, Iterable) or
                     any(not isinstance(pm, PopulationMap) for pm in
                         population_maps)):
                 raise ValueError('population_maps should be a list of '
@@ -185,7 +188,7 @@ class BngSimulator(Simulator):
 
             sim_prefix = 0
             for pset_idx in range(n_param_sets):
-                for n in range(len(self.param_values[pset_idx])):
+                for n in range(len(params_names)):
                     bngfile.set_parameter(params_names[n],
                                           self.param_values[pset_idx][n])
                 for cp, values in self.initials_dict.items():

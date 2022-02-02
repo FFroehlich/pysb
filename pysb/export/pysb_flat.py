@@ -23,12 +23,8 @@ following line::
 
 """
 
-import pysb
 from pysb.export import Exporter
-try:
-    from cStringIO import StringIO
-except ImportError:
-    from io import StringIO
+from io import StringIO
 
 class PysbFlatExporter(Exporter):
     """A class for generating PySB "flat" model source code from a model.
@@ -63,7 +59,7 @@ class PysbFlatExporter(Exporter):
         output.write("\n")
         output.write("from pysb import Model, Monomer, Parameter, Expression, "
                      "Compartment, Rule, Observable, Initial, MatchOnce, "
-                     "Annotation, EnergyPattern, ANY, WILD\n")
+                     "Annotation, EnergyPattern, MultiState, Tag, ANY, WILD\n")
         output.write("from sympy import exp, log\n")
         output.write("\n")
         output.write("Model()\n")
@@ -73,6 +69,7 @@ class PysbFlatExporter(Exporter):
         write_cset(self.model.expressions_constant())
         write_cset(self.model.compartments)
         write_cset(self.model.observables)
+        write_cset(self.model.tags)
         write_cset(self.model.expressions_dynamic())
         write_cset(self.model.rules)
         write_cset(self.model.energypatterns)

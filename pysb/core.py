@@ -12,7 +12,8 @@ import numbers
 import sympy
 import scipy.sparse
 import networkx as nx
-from collections.abc import Iterable, Mapping, Sequence, Set, OrderedDict
+from collections.abc import Iterable, Mapping, Sequence, Set
+from collections import OrderedDict
 
 from importlib import reload
 

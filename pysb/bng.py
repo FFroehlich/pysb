@@ -857,7 +857,7 @@ def _parse_reaction(model, line, reaction_cache):
     rate_param = [model.parameters.get(r) or model.expressions.get(r) or
                   model._derived_parameters.get(r) or
                   model._derived_expressions.get(r) or float(r) for r in rate]
-    combined_rate = sympy.Mul(*[sympy.S(t) for t in r_names + rate_param])s
+    combined_rate = sympy.Mul(*[sympy.S(t) for t in r_names + rate_param])
     reaction = {
         'reactants': reactants,
         'products': products,

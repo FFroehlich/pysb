@@ -553,6 +553,7 @@ class MonomerPattern(object):
         self.site_conditions = site_conditions
         self.compartment = compartment
         self._graph = None
+        self._tag = None
 
     def is_concrete(self):
         """

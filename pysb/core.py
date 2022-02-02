@@ -900,11 +900,19 @@ class ComplexPattern(object):
                     bond_edges[bond].append(mon_site_id)
 
         for mp in self.monomer_patterns:
-            if isinstance(state_or_bond, MultiState):
-                # Duplicate sites
-                [_handle_site_instance(s) for s in state_or_bond]
-            else:
-                _handle_site_instance(state_or_bond)
+            mon_node_id = next(node_count)
+            g.add_node(mon_node_id, id=mp.monomer)
+            if mp.compartment or self.compartment:
+                cpt_node_id = add_or_get_compartment_node(mp.compartment or
+                                                          self.compartment)
+                g.add_edge(mon_node_id, cpt_node_id)
+
+            for site, state_or_bond in mp.site_conditions.items():
+                if isinstance(state_or_bond, MultiState):
+                    # Duplicate sites
+                    [_handle_site_instance(s) for s in state_or_bond]
+                else:
+                    _handle_site_instance(state_or_bond)
 
         # Unbound edges
         unbound_sites = bond_edges.pop(NO_BOND, None)

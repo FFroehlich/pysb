@@ -739,44 +739,6 @@ class MonomerPattern(object):
         return value
 
 
-def site_condition_from_node(graph, monomer, site_node, bonds):
-    states = []
-    site = graph.nodes[site_node]['id']
-    for condition_node in graph.neighbors(site_node):
-        state_candidate = graph.nodes[condition_node]['id']
-        if state_candidate == 'NoBond':
-            continue
-        elif isinstance(state_candidate, Monomer):
-            continue
-        elif site in monomer.site_states and state_candidate in \
-                monomer.site_states[site]:
-            states.append(state_candidate)
-        elif isinstance(state_candidate, AnyBondTester) and \
-                not isinstance(state_candidate, int):
-            states.append(ANY)
-        else:
-            if site_node in bonds:
-                states.append(bonds.index(site_node) + 1)
-            else:
-                states.append(len(bonds) + 1)
-                bonds.append(condition_node)
-    if len(states) == 0:
-        return None
-    elif len(states) == 1:
-        return states[0]
-    elif len(states) == 2 and any(not isinstance(state, int)
-                                  for state in states):
-        if isinstance(states[1], int):
-            return tuple(states)
-        else:
-            return states[1], states[0]
-    else:
-        return sorted(states)
-
-
-NO_BOND = 'NoBond'
-
-
 class AnyBondTester(object):
     def __eq__(self, other):
         return not isinstance(other, Component) and other != NO_BOND
@@ -903,6 +865,8 @@ class ComplexPattern(object):
 
         NO_BOND = 'NoBond'
 
+        NO_BOND = 'NoBond'
+
         def autoinc():
             i = 0
             while True:
@@ -921,7 +885,7 @@ class ComplexPattern(object):
             try:
                 return _cpt_nodes[cpt]
             except KeyError:
-                cpt_node_id = f'compartment_{cpt.name}'
+                cpt_node_id = next(node_count)
                 _cpt_nodes[cpt] = cpt_node_id
                 g.add_node(cpt_node_id, id=cpt)
                 return cpt_node_id
@@ -1399,6 +1363,12 @@ class Parameter(Component, Symbol):
     
     def get_value(self):
         return self.value
+    
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
 
     def check_value(self, value):
         if self.is_integer:
@@ -1677,7 +1647,6 @@ def validate_const_expr(obj, description):
                description_upperfirst)
         raise ConstantExpressionError(msg)
 
-
 class Observable(Component, Symbol):
     """
     Model component representing a linear combination of species.
@@ -1717,7 +1686,7 @@ class Observable(Component, Symbol):
     """
 
     def __new__(cls, name, reaction_pattern, match='molecules', _export=True):
-        return super(Observable, cls).__new__(cls, name)
+        return super(sympy.Symbol, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return self.name, self.reaction_pattern, self.match, False
@@ -1736,6 +1705,12 @@ class Observable(Component, Symbol):
         self.match = match
         self.species = []
         self.coefficients = []
+
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
 
     def expand_obs(self):
         """ Expand observables in terms of species and coefficients """
@@ -1780,7 +1755,7 @@ class Expression(Component, Symbol):
     """
 
     def __new__(cls, name, expr, _export=True):
-        return super(Expression, cls).__new__(cls, name)
+        return super(sympy.Symbol, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return self.name, self.expr, False
@@ -1828,6 +1803,12 @@ class Expression(Component, Symbol):
 
     def tags(self):
         return sorted(self.expr.atoms(Tag), key=lambda tag: tag.name)
+
+    # This is needed to make sympy's evalf machinery treat this class like a
+    # Symbol.
+    @property
+    def func(self):
+        return sympy.Symbol
 
     def __repr__(self):
         if isinstance(self.expr, (Parameter, Expression)):

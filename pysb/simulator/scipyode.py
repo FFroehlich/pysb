@@ -279,6 +279,21 @@ def _patch_distutils_logging(base_logger):
             setattr(module, name, value)
 
 
+@contextlib.contextmanager
+def _set_cflags_no_warnings(logger):
+    """ Suppress cython warnings by setting -w flag """
+    del_cflags = False
+    if 'CFLAGS' not in os.environ \
+            and not logger.isEnabledFor(EXTENDED_DEBUG):
+        del_cflags = True
+        os.environ['CFLAGS'] = '-w'
+    try:
+        yield
+    finally:
+        if del_cflags:
+            del os.environ['CFLAGS']
+
+
 class _DistutilsProxyLoggerAdapter(logging.LoggerAdapter):
     """A logging adapter for the distutils logging patcher."""
     def process(self, msg, kwargs):

@@ -13,6 +13,7 @@ import sympy
 import numpy as np
 import scipy.sparse
 import networkx as nx
+from collections.abc import Iterable, Set, Sequence, Mapping
 
 from importlib import reload
 
@@ -719,11 +720,6 @@ class MonomerPattern(object):
         return value
 
 
-class AnyBondTester(object):
-    def __eq__(self, other):
-        return not isinstance(other, Component) and other != NO_BOND
-
-
 class ComplexPattern(object):
     """
     A bound set of MonomerPatterns, i.e. a pattern to match a complex.
@@ -752,6 +748,12 @@ class ComplexPattern(object):
         # ensure compartment is a Compartment
         if compartment and not isinstance(compartment, Compartment):
             raise Exception("compartment is not a Compartment object")
+
+        # Drop species cpt, if redundant
+        if compartment and len(monomer_patterns) == 1 and \
+                monomer_patterns[0].compartment == compartment:
+            compartment = None
+
         self.monomer_patterns = monomer_patterns
         self.compartment = compartment
         self.match_once = match_once
@@ -828,8 +830,6 @@ class ComplexPattern(object):
 
         NO_BOND = 'NoBond'
 
-        NO_BOND = 'NoBond'
-
         def autoinc():
             i = 0
             while True:
@@ -861,46 +861,50 @@ class ComplexPattern(object):
         if self.compartment:
             species_cpt_node_id = add_or_get_compartment_node(self.compartment)
 
+        def _handle_site_instance(state_or_bond):
+            mon_site_id = next(node_count)
+            g.add_node(mon_site_id, id=site)
+            g.add_edge(mon_node_id, mon_site_id)
+            state = None
+            bond_num = None
+            if state_or_bond is WILD:
+                return
+            elif isinstance(state_or_bond, str):
+                state = state_or_bond
+            elif is_state_bond_tuple(state_or_bond):
+                state = state_or_bond[0]
+                bond_num = state_or_bond[1]
+            elif isinstance(state_or_bond, (int, list)):
+                bond_num = state_or_bond
+            elif state_or_bond is not ANY and state_or_bond is not None:
+                raise ValueError('Unrecognized state: {}'.format(
+                    state_or_bond))
+
+            if state_or_bond is ANY or bond_num is ANY:
+                bond_num = any_bond_tester
+                any_bond_tester_id = next(node_count)
+                g.add_node(any_bond_tester_id, id=any_bond_tester)
+                g.add_edge(mon_site_id, any_bond_tester_id)
+
+            if state is not None:
+                mon_site_state_id = next(node_count)
+                g.add_node(mon_site_state_id, id=state)
+                g.add_edge(mon_site_id, mon_site_state_id)
+
+            if bond_num is None:
+                bond_edges[NO_BOND].append(mon_site_id)
+            elif isinstance(bond_num, int):
+                bond_edges[bond_num].append(mon_site_id)
+            elif isinstance(bond_num, list):
+                for bond in bond_num:
+                    bond_edges[bond].append(mon_site_id)
+
         for mp in self.monomer_patterns:
-            mon_node_id = next(node_count)
-            g.add_node(mon_node_id, id=mp.monomer)
-            if mp.compartment or self.compartment:
-                cpt_node_id = add_or_get_compartment_node(mp.compartment or
-                                                          self.compartment)
-                g.add_edge(mon_node_id, cpt_node_id)
-
-            for site, state_or_bond in mp.site_conditions.items():
-                mon_site_id = next(node_count)
-                g.add_node(mon_site_id, id=site)
-                g.add_edge(mon_node_id, mon_site_id)
-                state = None
-                bond_num = None
-                if state_or_bond is WILD:
-                    continue
-                elif isinstance(state_or_bond, basestring):
-                    state = state_or_bond
-                elif isinstance(state_or_bond, collections.Iterable) and len(
-                        state_or_bond) == 2:
-                    state = state_or_bond[0]
-                    bond_num = state_or_bond[1]
-                elif isinstance(state_or_bond, int):
-                    bond_num = state_or_bond
-
-                if state_or_bond is ANY or bond_num is ANY:
-                    bond_num = any_bond_tester
-                    any_bond_tester_id = next(node_count)
-                    g.add_node(any_bond_tester_id, id=any_bond_tester)
-                    g.add_edge(mon_site_id, any_bond_tester_id)
-
-                if state is not None:
-                    mon_site_state_id = next(node_count)
-                    g.add_node(mon_site_state_id, id=state)
-                    g.add_edge(mon_site_id, mon_site_state_id)
-
-                if bond_num is None:
-                    bond_edges[NO_BOND].append(mon_site_id)
-                elif isinstance(bond_num, int):
-                    bond_edges[bond_num].append(mon_site_id)
+            if isinstance(state_or_bond, MultiState):
+                # Duplicate sites
+                [_handle_site_instance(s) for s in state_or_bond]
+            else:
+                _handle_site_instance(state_or_bond)
 
         # Unbound edges
         unbound_sites = bond_edges.pop(NO_BOND, None)
@@ -1330,12 +1334,6 @@ class Parameter(Component, Symbol):
     
     def get_value(self):
         return self.value
-    
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
 
     def check_value(self, value):
         if self.is_integer:
@@ -1653,7 +1651,7 @@ class Observable(Component, Symbol):
     """
 
     def __new__(cls, name, reaction_pattern, match='molecules', _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+        return super(Observable, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return self.name, self.reaction_pattern, self.match, False
@@ -1672,12 +1670,6 @@ class Observable(Component, Symbol):
         self.match = match
         self.species = []
         self.coefficients = []
-
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
 
     def expand_obs(self):
         """ Expand observables in terms of species and coefficients """
@@ -1722,7 +1714,7 @@ class Expression(Component, Symbol):
     """
 
     def __new__(cls, name, expr, _export=True):
-        return super(sympy.Symbol, cls).__new__(cls, name)
+        return super(Expression, cls).__new__(cls, name)
 
     def __getnewargs__(self):
         return self.name, self.expr, False
@@ -1731,7 +1723,6 @@ class Expression(Component, Symbol):
         if not isinstance(expr, sympy.Expr):
             raise ValueError('An Expression can only be created from a '
                              'sympy.Expr object')
-        Component.__init__(self, name, _export)
         self.expr = expr
         Component.__init__(self, name, _export)
 
@@ -1770,12 +1761,6 @@ class Expression(Component, Symbol):
 
     def tags(self):
         return sorted(self.expr.atoms(Tag), key=lambda tag: tag.name)
-
-    # This is needed to make sympy's evalf machinery treat this class like a
-    # Symbol.
-    @property
-    def func(self):
-        return sympy.Symbol
 
     def __repr__(self):
         if isinstance(self.expr, (Parameter, Expression)):

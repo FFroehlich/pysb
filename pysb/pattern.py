@@ -299,6 +299,13 @@ def match_complex_pattern(pattern, candidate, exact=False, count=False):
     -------
     True if pattern matches candidate, False otherwise
     """
+    if exact:
+        if not pattern.is_concrete():
+            raise ValueError('Pattern must be concrete for '
+                             'exact matching: {}'.format(pattern))
+        if not candidate.is_concrete():
+            raise ValueError('Candidate must be concrete for '
+                             'exact matching: {}'.format(candidate))
 
     if exact:
         if not pattern.is_concrete():

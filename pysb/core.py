@@ -1772,7 +1772,7 @@ class Expression(Component, Symbol):
         return sorted(self.expr.atoms(Tag), key=lambda tag: tag.name)
 
     def __repr__(self):
-        if isinstance(self.expr, (Parameter, Expression)):
+        if isinstance(self.expr, (Parameter, Expression, Observable)):
             expr_repr = self.expr.name
         else:
             expr_repr = repr(self.expr)

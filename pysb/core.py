@@ -1586,6 +1586,9 @@ class EnergyPattern(Component):
 
     def __init__(self, name, pattern, energy, _export=True):
         Component.__init__(self, name, _export)
+
+        if isinstance(pattern, MonomerPattern):
+            pattern = as_complex_pattern(pattern)
         if not isinstance(pattern, ComplexPattern):
             raise Exception("pattern is not a ComplexPattern object")
         if not isinstance(energy, sympy.Expr):

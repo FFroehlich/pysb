@@ -1358,8 +1358,8 @@ class Parameter(Component, Symbol):
         args = ', '.join([repr(self.name), repr(self.value)])
         if not self.assumptions0['nonnegative']:
             args += ', nonnegative=False'
-        if not self.assumptions0['integer']:
-            args += ', integer=False'
+        if self.assumptions0['integer']:
+            args += ', integer=True'
         return '%s(%s)' % (self.__class__.__name__, args)
 
     def __str__(self):

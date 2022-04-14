@@ -1355,7 +1355,12 @@ class Parameter(Component, Symbol):
                                  'parameter assumed to be nonnegative')
 
     def __repr__(self):
-        return '%s(%s, %s)' % (self.__class__.__name__, repr(self.name), repr(self.value))
+        args = ', '.join([repr(self.name), repr(self.value)])
+        if not self.assumptions0['nonnegative']:
+            args += ', nonnegative=False'
+        if not self.assumptions0['integer']:
+            args += ', integer=False'
+        return '%s(%s)' % (self.__class__.__name__, args)
 
     def __str__(self):
         return repr(self)
